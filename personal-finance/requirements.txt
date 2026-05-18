@@ -1,0 +1,8 @@
+pandas
+duckdb
+streamlit
+rapidfuzz
+watchdog
+plotly
+pyyaml
+pdfplumber

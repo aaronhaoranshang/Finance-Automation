@@ -1,0 +1,228 @@
+# CSV source detection and column mapping rules.
+# Update account_name when you want a friendlier account label per institution.
+sources:
+  triangle_pdf:
+    detection:
+      required_columns:
+        - Transaction Date
+        - Posting Date
+        - Transaction Description
+        - Amount
+      filename_contains:
+        - triangle
+    institution: Triangle
+    account_name: Triangle World Elite 4889
+    processed_file_label: Triangle
+    date_column: Transaction Date
+    posted_date_column: Posting Date
+    merchant_column: Transaction Description
+    amount_column: Amount
+    amount_multiplier: 1
+    currency: CAD
+  triangle_accountactivity:
+    detection:
+      required_columns:
+        - Transaction Date
+        - Description
+        - Debit
+        - Credit
+      filename_contains:
+        - accountactivity
+    institution: Triangle
+    account_name: Triangle World Elite 4889
+    processed_file_label: Triangle
+    date_column: Transaction Date
+    posted_date_column: Transaction Date
+    merchant_column: Description
+    debit_column: Debit
+    credit_column: Credit
+    amount_multiplier: 1
+    currency: CAD
+  mbna_9426:
+    detection:
+      required_columns:
+        - Posted Date
+        - Payee
+        - Amount
+    institution: MBNA
+    account_name: MBNA 9426
+    processed_file_label: MBNA
+    date_column: Posted Date
+    posted_date_column: Posted Date
+    merchant_column: Payee
+    amount_column: Amount
+    amount_multiplier: -1
+    currency: CAD
+  rbc_chequing:
+    detection:
+      required_columns:
+        - Account Type
+        - Account Number
+        - Transaction Date
+        - Description 1
+        - CAD$
+      column_values:
+        Account Type:
+          - Chequing
+    institution: RBC
+    account_name_template: "{account_alias}"
+    account_type_column: Account Type
+    account_number_column: Account Number
+    account_aliases:
+      "4307": RBC Chequing
+    processed_file_label_template: "{account_alias}"
+    date_column: Transaction Date
+    posted_date_column: Transaction Date
+    merchant_columns:
+      - Description 1
+      - Description 2
+    amount_columns:
+      - CAD$
+      - USD$
+    amount_multiplier: -1
+    currency: CAD
+  rbc_credit_card:
+    detection:
+      required_columns:
+        - Account Type
+        - Account Number
+        - Transaction Date
+        - Description 1
+        - CAD$
+      column_values:
+        Account Type:
+          - Visa
+    institution: RBC
+    account_name_template: "{account_alias}"
+    account_type_column: Account Type
+    account_number_column: Account Number
+    account_aliases:
+      "6046": RBC Avion
+      "6064": RBC Avion
+      "9419": RBC ION
+    processed_file_label_template: "{account_alias}"
+    date_column: Transaction Date
+    posted_date_column: Transaction Date
+    merchant_columns:
+      - Description 1
+      - Description 2
+    amount_columns:
+      - CAD$
+      - USD$
+    amount_multiplier: -1
+    currency: CAD
+  scotia_3128:
+    detection:
+      required_columns:
+        - Filter
+        - Date
+        - Description
+        - Type of Transaction
+        - Amount
+      filename_contains:
+        - scotia
+    institution: Scotiabank
+    account_name: Scotia Momentum Visa Infinite 3128
+    processed_file_label: Scotiabank
+    date_column: Date
+    posted_date_column: Date
+    merchant_columns:
+      - Description
+      - Sub-description
+    amount_column: Amount
+    amount_multiplier: 1
+    currency: CAD
+  scotia_preferred_package:
+    detection:
+      required_columns:
+        - Filter
+        - Date
+        - Description
+        - Type of Transaction
+        - Amount
+        - Balance
+      filename_contains:
+        - preferred_package
+    institution: Scotiabank
+    account_name: Scotiabank Preferred Package 9623
+    processed_file_label: Scotiabank Preferred Package
+    date_column: Date
+    posted_date_column: Date
+    merchant_columns:
+      - Description
+      - Sub-description
+    amount_column: Amount
+    amount_multiplier: -1
+    currency: CAD
+  amex:
+    detection:
+      required_columns:
+        - Transaction Date
+        - Cardmember
+    institution: Amex
+    account_name_column: Cardmember
+    date_column: Transaction Date
+    posted_date_column: Date Processed
+    merchant_column: Description
+    amount_column: Amount
+    currency: CAD
+  rbc:
+    detection:
+      required_columns:
+        - Account Type
+        - Transaction Date
+      any_columns:
+        - Description
+        - Description 1
+    institution: RBC
+    account_name_template: "{account_alias}"
+    account_type_column: Account Type
+    account_number_column: Account Number
+    account_aliases:
+      "6046": RBC Avion
+      "6064": RBC Avion
+      "9419": RBC ION
+    processed_file_label_template: "{account_alias}"
+    date_column: Transaction Date
+    posted_date_column: Posted Date
+    fallback_posted_date_columns:
+      - Transaction Date
+    merchant_column: Description
+    fallback_merchant_columns:
+      - Description 1
+      - Description 2
+    amount_column: Amount
+    fallback_amount_columns:
+      - CAD$
+      - USD$
+    amount_multiplier: -1
+    currency: CAD
+  pc_financial:
+    detection:
+      required_columns:
+        - Transaction Description
+    institution: PC Financial
+    account_name: PC Financial
+    date_column: Transaction Date
+    posted_date_column: Posting Date
+    merchant_column: Transaction Description
+    amount_column: Amount
+    currency: CAD
+  triangle:
+    detection:
+      any_columns:
+        - Transaction Description
+        - Description
+      filename_contains:
+        - triangle
+        - canadian_tire
+        - ctfs
+    institution: Triangle
+    account_name: Triangle Mastercard
+    date_column: Transaction Date
+    posted_date_column: Posted Date
+    merchant_column: Transaction Description
+    fallback_merchant_columns:
+      - Description
+    amount_column: Amount
+    currency: CAD

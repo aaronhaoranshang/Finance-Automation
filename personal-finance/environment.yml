@@ -1,0 +1,15 @@
+name: finance
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - pandas
+      - duckdb
+      - streamlit
+      - rapidfuzz
+      - watchdog
+      - plotly
+      - pyyaml
+      - pdfplumber

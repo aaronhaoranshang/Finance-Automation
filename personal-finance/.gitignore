@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.streamlit/
+
+data/*.duckdb
+data/*.duckdb.wal
+imports/to_import/*.csv
+imports/processed/*.csv
+imports/failed/*.csv
