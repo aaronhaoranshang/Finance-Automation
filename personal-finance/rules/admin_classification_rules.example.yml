@@ -1,0 +1,13 @@
+# Copy this to rules/admin_classification_rules.yml for private/personal overrides.
+# The real admin_classification_rules.yml file is ignored by git.
+self_transfer_patterns:
+  - "YOUR NAME"
+  - "SPOUSE OR PARTNER NAME"
+reimbursement_patterns:
+  - "MERCHANT OR DESCRIPTION YOU PAID FOR SOMEONE ELSE"
+refund_reimbursement_patterns:
+  - "MERCHANT CREDIT YOU WANT OUTSIDE INCOME"
+stored_value_reload:
+  minimum_amount: 450
+  merchants:
+    - "STORED VALUE RELOAD MERCHANT"

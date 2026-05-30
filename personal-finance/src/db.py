@@ -18,6 +18,7 @@ TRANSACTION_COLUMNS = [
     "merchant_clean",
     "amount",
     "transaction_type",
+    "scope",
     "currency",
     "category",
     "subcategory",
@@ -46,6 +47,7 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
             merchant_clean VARCHAR,
             amount DECIMAL(18, 2),
             transaction_type VARCHAR,
+            scope VARCHAR,
             currency VARCHAR,
             category VARCHAR,
             subcategory VARCHAR,
@@ -55,6 +57,8 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
         """
     )
     ensure_column(con, "transactions", "transaction_type", "VARCHAR")
+    ensure_column(con, "transactions", "scope", "VARCHAR DEFAULT 'personal'")
+    con.execute("UPDATE transactions SET scope = 'personal' WHERE scope IS NULL OR scope = ''")
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS import_log (
@@ -151,3 +155,27 @@ def update_categorizations(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> 
     )
     con.unregister("category_updates")
     return len(payload)
+
+
+def update_transaction_fields(
+    con: duckdb.DuckDBPyConnection,
+    transaction_id: str,
+    merchant_clean: str,
+    transaction_type: str,
+    scope: str,
+    category: str,
+    subcategory: str,
+) -> None:
+    con.execute(
+        """
+        UPDATE transactions
+        SET
+            merchant_clean = ?,
+            transaction_type = ?,
+            scope = ?,
+            category = ?,
+            subcategory = ?
+        WHERE transaction_id = ?
+        """,
+        [merchant_clean, transaction_type, scope, category, subcategory, transaction_id],
+    )

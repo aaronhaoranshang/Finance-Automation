@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -161,19 +160,3 @@ def refresh_existing_transactions() -> int:
         return update_categorizations(con, refreshed)
     finally:
         con.close()
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Merchant categorization utilities.")
-    parser.add_argument("--refresh-db", action="store_true", help="Reapply merchant_rules.yml to existing DuckDB transactions.")
-    args = parser.parse_args()
-
-    if args.refresh_db:
-        updated = refresh_existing_transactions()
-        print(f"Refreshed categories for {updated} transactions.")
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()

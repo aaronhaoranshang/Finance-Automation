@@ -11,7 +11,7 @@ sources:
       filename_contains:
         - triangle
     institution: Triangle
-    account_name: Triangle World Elite 4889
+    account_name: Triangle Mastercard
     processed_file_label: Triangle
     date_column: Transaction Date
     posted_date_column: Posting Date
@@ -29,7 +29,7 @@ sources:
       filename_contains:
         - accountactivity
     institution: Triangle
-    account_name: Triangle World Elite 4889
+    account_name: Triangle Mastercard
     processed_file_label: Triangle
     date_column: Transaction Date
     posted_date_column: Transaction Date
@@ -45,7 +45,7 @@ sources:
         - Payee
         - Amount
     institution: MBNA
-    account_name: MBNA 9426
+    account_name: MBNA Credit Card
     processed_file_label: MBNA
     date_column: Posted Date
     posted_date_column: Posted Date
@@ -68,8 +68,7 @@ sources:
     account_name_template: "{account_alias}"
     account_type_column: Account Type
     account_number_column: Account Number
-    account_aliases:
-      "4307": RBC Chequing
+    account_aliases: {}
     processed_file_label_template: "{account_alias}"
     date_column: Transaction Date
     posted_date_column: Transaction Date
@@ -96,10 +95,7 @@ sources:
     account_name_template: "{account_alias}"
     account_type_column: Account Type
     account_number_column: Account Number
-    account_aliases:
-      "6046": RBC Avion
-      "6064": RBC Avion
-      "9419": RBC ION
+    account_aliases: {}
     processed_file_label_template: "{account_alias}"
     date_column: Transaction Date
     posted_date_column: Transaction Date
@@ -122,7 +118,7 @@ sources:
       filename_contains:
         - scotia
     institution: Scotiabank
-    account_name: Scotia Momentum Visa Infinite 3128
+    account_name: Scotia Credit Card
     processed_file_label: Scotiabank
     date_column: Date
     posted_date_column: Date
@@ -144,7 +140,7 @@ sources:
       filename_contains:
         - preferred_package
     institution: Scotiabank
-    account_name: Scotiabank Preferred Package 9623
+    account_name: Scotiabank Bank Account
     processed_file_label: Scotiabank Preferred Package
     date_column: Date
     posted_date_column: Date
@@ -178,10 +174,7 @@ sources:
     account_name_template: "{account_alias}"
     account_type_column: Account Type
     account_number_column: Account Number
-    account_aliases:
-      "6046": RBC Avion
-      "6064": RBC Avion
-      "9419": RBC ION
+    account_aliases: {}
     processed_file_label_template: "{account_alias}"
     date_column: Transaction Date
     posted_date_column: Posted Date

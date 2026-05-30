@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import calendar
 import re
 import shutil
@@ -12,7 +11,7 @@ import pandas as pd
 import duckdb
 
 from db import connect, insert_transactions, log_import
-from normalize import detect_source, normalize_transactions, read_csv_flex
+from normalize import detect_source, load_classification_rules, load_source_rules, normalize_transactions, read_csv_flex
 from pdf_extract import read_pdf_statement
 from paths import DB_PATH, FAILED_DIR, PROCESSED_DIR, TO_IMPORT_DIR, ensure_project_dirs
 
@@ -34,6 +33,9 @@ class ImportPreview:
     debt_payments: float
     income: float
     transfers: float
+    reimbursements: float
+    stored_value_reloads: float
+    manual_review: float
     net_spend: float
     file_net_total: float
 
@@ -111,10 +113,12 @@ def safe_filename(filename: str) -> str:
     return cleaned
 
 
-def preview_file(file_path: Path) -> ImportPreview:
+def preview_file(file_path: Path, admin: bool = False) -> ImportPreview:
     raw = read_source_file(file_path)
-    source_name, rule = detect_source(raw, file_path)
-    normalized = normalize_transactions(raw, source_name, rule, file_path.name)
+    source_rules = load_source_rules(admin=admin)
+    source_name, rule = detect_source(raw, file_path, source_rules)
+    classification_rules = load_classification_rules(admin=admin)
+    normalized = normalize_transactions(raw, source_name, rule, file_path.name, classification_rules)
     existing_duplicates = count_existing_duplicates(normalized)
     return build_preview(file_path, source_name, rule, raw, normalized, existing_duplicates)
 
@@ -131,6 +135,9 @@ def build_preview(
     debt_payments = abs(float(normalized.loc[normalized["transaction_type"] == "debt_payment", "amount"].sum()))
     income = abs(float(normalized.loc[normalized["transaction_type"] == "income", "amount"].sum()))
     transfers = abs(float(normalized.loc[normalized["transaction_type"] == "transfer", "amount"].sum()))
+    reimbursements = abs(float(normalized.loc[normalized["transaction_type"] == "reimbursement", "amount"].sum()))
+    stored_value_reloads = abs(float(normalized.loc[normalized["transaction_type"] == "stored_value_reload", "amount"].sum()))
+    manual_review = abs(float(normalized.loc[normalized["transaction_type"] == "manual_review", "amount"].sum()))
     refunds_and_credits = abs(float(normalized.loc[normalized["transaction_type"].isin(["refund", "credit"]), "amount"].sum()))
     gross_expenses = float(normalized.loc[normalized["transaction_type"] == "expense", "amount"].sum())
     net_spend = gross_expenses - refunds_and_credits
@@ -152,6 +159,9 @@ def build_preview(
         debt_payments=debt_payments,
         income=income,
         transfers=transfers,
+        reimbursements=reimbursements,
+        stored_value_reloads=stored_value_reloads,
+        manual_review=manual_review,
         net_spend=net_spend,
         file_net_total=file_net_total,
     )
@@ -199,19 +209,24 @@ def print_preview(preview: ImportPreview) -> None:
     print(f"  Debt payments ignored for spend: ${preview.debt_payments:,.2f}")
     print(f"  Income: ${preview.income:,.2f}")
     print(f"  Transfers ignored for spend: ${preview.transfers:,.2f}")
+    print(f"  Reimbursements ignored for spend: ${preview.reimbursements:,.2f}")
+    print(f"  Stored-value reloads ignored for spend: ${preview.stored_value_reloads:,.2f}")
+    print(f"  Needs manual review: ${preview.manual_review:,.2f}")
     print(f"  Net spend: ${preview.net_spend:,.2f}")
     print(f"  File net total: ${preview.file_net_total:,.2f}")
 
 
-def ingest_file(file_path: Path) -> dict[str, object]:
+def ingest_file(file_path: Path, admin: bool = False) -> dict[str, object]:
     ensure_project_dirs()
     con = connect()
     rows_seen = 0
     try:
+        classification_rules = load_classification_rules(admin=admin)
+        source_rules = load_source_rules(admin=admin)
         raw = read_source_file(file_path)
         rows_seen = len(raw)
-        source_name, rule = detect_source(raw, file_path)
-        normalized = normalize_transactions(raw, source_name, rule, file_path.name)
+        source_name, rule = detect_source(raw, file_path, source_rules)
+        normalized = normalize_transactions(raw, source_name, rule, file_path.name, classification_rules)
         rows_inserted = insert_transactions(con, normalized)
         destination_name = processed_filename(file_path, normalized, rule)
         destination = move_file(file_path, PROCESSED_DIR, destination_name)
@@ -241,12 +256,12 @@ def ingest_file(file_path: Path) -> dict[str, object]:
         con.close()
 
 
-def ingest_directory(directory: Path = TO_IMPORT_DIR) -> list[dict[str, object]]:
+def ingest_directory(directory: Path = TO_IMPORT_DIR, admin: bool = False) -> list[dict[str, object]]:
     ensure_project_dirs()
     results = []
     for file_path in supported_import_files(directory):
         if file_path.is_file():
-            results.append(ingest_file(file_path))
+            results.append(ingest_file(file_path, admin=admin))
     return results
 
 
@@ -270,52 +285,21 @@ def import_message(preview: ImportPreview, destination_name: str) -> str:
         f"debt_payments={preview.debt_payments:.2f}; "
         f"income={preview.income:.2f}; "
         f"transfers={preview.transfers:.2f}; "
+        f"reimbursements={preview.reimbursements:.2f}; "
+        f"stored_value_reloads={preview.stored_value_reloads:.2f}; "
+        f"manual_review={preview.manual_review:.2f}; "
         f"net_spend={preview.net_spend:.2f}; "
         f"file_net_total={preview.file_net_total:.2f}"
     )
 
 
-def preview_paths(paths: list[Path]) -> None:
+def preview_paths(paths: list[Path], admin: bool = False) -> None:
     targets = paths or supported_import_files(TO_IMPORT_DIR)
     if not targets:
         print("No CSV files found to preview.")
         return
     for path in targets:
         try:
-            print_preview(preview_file(path))
+            print_preview(preview_file(path, admin=admin))
         except Exception as exc:
             print(f"Failed preview {path.name}: {exc}")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Import bank CSVs into DuckDB.")
-    parser.add_argument("--dry-run", action="store_true", help="Preview import, duplicates, totals, and processed filename without writing.")
-    parser.add_argument("paths", nargs="*", type=Path, help="Optional CSV files to import. Defaults to imports/to_import/*.csv.")
-    args = parser.parse_args()
-
-    if args.dry_run:
-        preview_paths(args.paths)
-        return
-
-    if args.paths:
-        results = [ingest_file(path) for path in args.paths]
-    else:
-        results = ingest_directory()
-
-    if not results:
-        print("No CSV files found to import.")
-        return
-
-    for result in results:
-        if result["status"] == "processed":
-            print(
-                f"Processed {result['file']}: "
-                f"{result['rows_inserted']}/{result['rows_seen']} new rows, "
-                f"{result.get('duplicates', 0)} duplicates."
-            )
-        else:
-            print(f"Failed {result['file']}: {result.get('error', 'unknown error')}")
-
-
-if __name__ == "__main__":
-    main()

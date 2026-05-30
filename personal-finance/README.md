@@ -1,6 +1,6 @@
 # Personal Finance Automation
 
-Local Mac-friendly finance automation with CSV ingestion, DuckDB storage, merchant rules, and a Streamlit dashboard.
+Local personal finance automation with CSV/PDF ingestion, DuckDB storage, merchant rules, and a desktop dashboard.
 
 ## Setup
 
@@ -20,48 +20,123 @@ conda activate finance
 
 ## Use
 
-Drop bank CSV files into `imports/to_import`, then run:
+Start the app:
 
 ```bash
-python src/ingest.py
-streamlit run src/app.py
+python run_app.py
 ```
 
-Preview an import before writing to DuckDB or moving files:
+On a new computer, the app starts fresh with an empty local DuckDB database and generic rules. Open the `Imports` page, upload CSV/PDF statements, preview them, then import.
+
+Use `src/finance.py` only for optional terminal automation. The other Python files are internal modules used by the app.
+
+For your personal database, use `--admin`:
 
 ```bash
-python src/ingest.py --dry-run
-python src/ingest.py --dry-run imports/to_import/example.csv
+python src/finance.py import --admin --dry-run
+python src/finance.py import --admin
+python src/finance.py dashboard --port 8502
 ```
 
-The preview includes detected account, majority transaction month, processed filename, duplicate count, gross expenses, refunds/credits, card payments, net spend, and the file net total for quick reconciliation.
-
-To auto-import new CSVs while the folder is open:
+Common commands:
 
 ```bash
-python src/watcher.py
+python src/finance.py import --admin                  # import files from imports/to_import
+python src/finance.py import --admin --dry-run        # preview import without writing/moving files
+python src/finance.py refresh --admin                 # reclassify existing DuckDB rows after rule changes
+python src/finance.py dashboard --port 8502           # open the dashboard
+python src/finance.py watch --admin                   # auto-import new CSV/PDF files dropped into imports/to_import
 ```
 
-The DuckDB file is created at `data/finance.duckdb`.
+The preview includes detected account, majority transaction month, processed filename, duplicate count, gross expenses, refunds/credits, payments, reimbursements, stored-value reloads, manual-review amount, net spend, and the file net total for quick checking.
+
+In development, the DuckDB file is created at `data/finance.duckdb`. In a packaged desktop app, each computer gets its own fresh local data folder:
+
+- macOS: `~/Library/Application Support/Personal Finance Automation`
+- Windows: `%LOCALAPPDATA%\Personal Finance Automation`
+
+Set `PERSONAL_FINANCE_HOME` if you want to override the data folder.
+
+## Build Desktop App
+
+Desktop builds use PyInstaller. Build on the target operating system: create the Windows `.exe` on Windows, and create the macOS `.app` on macOS.
+
+macOS:
+
+```bash
+conda activate finance
+./scripts/build_macos.sh
+```
+
+Output:
+
+```text
+dist/Personal Finance.app
+```
+
+Windows PowerShell:
+
+```powershell
+conda activate finance
+.\scripts\build_windows.ps1
+```
+
+Output:
+
+```text
+dist\PersonalFinance\PersonalFinance.exe
+```
+
+The packaged app starts with generic rules and an empty local database on each computer. The real `rules/admin_*.yml` files are not bundled; only the example templates are included.
+
+## Generic vs Private Mode
+
+The generic mode is safe to share: it uses source rules, merchant rules, and broad transaction logic.
+
+Your private mode is enabled with `--admin`. It loads two ignored local files:
+
+- `rules/admin_classification_rules.yml`: personalized classification rules such as your own names, friend reimbursements, Costco refund treatment, and PayPower reload patterns.
+- `rules/admin_source_rules.yml`: personalized account labels and account-number aliases.
+
+Shareable templates live at `rules/admin_classification_rules.example.yml` and `rules/admin_source_rules.example.yml`.
+
+Use private mode for your real books:
+
+```bash
+python src/finance.py import --admin
+python src/finance.py import --admin --dry-run
+python src/finance.py refresh --admin
+```
+
+Use generic mode for a clean/public version:
+
+```bash
+python src/finance.py import
+python src/finance.py refresh
+```
+
+Use one mode consistently per DuckDB file. Your personal database should use `--admin` for imports and refreshes; the generic mode is for a clean/public database.
 
 ## Dashboard
 
 Run:
 
 ```bash
-streamlit run src/app.py
+python run_app.py
 ```
 
 Main pages:
 
+- `Imports`: upload CSV/PDF statements, preview totals, and import into the local database.
 - `Overview`: filtered gross spend, refunds/credits, net spend, income, and ignored movement.
 - `Monthly Detail`: month-level category, subcategory, merchant, account, and transaction drilldowns.
-- `Reconciliation`: account-month and source-file tables for comparing against a manual tracker, with CSV download.
+- `Audit`: account-month and source-file tables for checking imported totals, with CSV download.
 - `Drilldown`: choose a metric such as ignored movement, income, transfers, or refunds and see the exact transactions behind it.
+- `Review Queue`: fix ambiguous rows directly in the dashboard, including transaction type, personal/shared scope, category, and optional subcategory.
 - `Merchant Rules`: uncategorized queue plus flexible rule creation.
-- `Transactions`: raw filtered transaction table.
+- `Transactions`: raw filtered transaction table plus a single-transaction editor.
 
-Use the sidebar filters to reconcile one month/account/type at a time.
+Use the sidebar filters to check one month/account/scope/type at a time. Scope defaults to `personal`; switch a transaction to `shared` from the `Review Queue` or `Transactions` page when needed.
 
 Processed CSVs are renamed when they move into `imports/processed`, using the account label and the month containing the majority of transactions. Examples:
 
@@ -72,14 +147,14 @@ Processed CSVs are renamed when they move into `imports/processed`, using the ac
 
 ## Configure Sources
 
-Bank-specific CSV rules live in `rules/source_rules.yml`. Each source can define detection columns, transaction/posting date columns, merchant columns, amount columns, and account naming.
+Bank-specific CSV rules live in `rules/source_rules.yml`. Each source can define detection columns, transaction/posting date columns, merchant columns, amount columns, and generic account naming. Private account aliases live in `rules/admin_source_rules.yml` and are applied only with `--admin`.
 
 Current statement mappings:
 
-- `Apr2026_9426.csv` style files are detected as `MBNA 9426`.
-- `download-transactions.csv` style RBC exports are detected from `Account Type`, `Account Number`, `Description 1`, and `CAD$`; `9419` is labelled `RBC ION`, while `6046` and `6064` are labelled `RBC Avion`.
-- `Scotia_Momentum_Visa_Infinite__Card_3128_050926.csv` style files are detected as `Scotia Momentum Visa Infinite 3128`.
-- `Preferred_Package_9623_051026.csv` style files are detected as `Scotiabank Preferred Package 9623`.
+- `Apr2026_9426.csv` style files are detected as an MBNA credit card.
+- `download-transactions.csv` style RBC exports are detected from `Account Type`, `Account Number`, `Description 1`, and `CAD$`; private aliases such as `RBC ION` or `RBC Avion` are applied only in `--admin` mode.
+- `Scotia_Momentum_Visa_Infinite__Card_3128_050926.csv` style files are detected as a Scotia credit card.
+- `Preferred_Package_9623_051026.csv` style files are detected as a Scotiabank bank account.
 - `accountactivity*.csv` no-header Triangle exports are detected as Triangle account activity.
 - `*Triangle-WorldEliteMastercard.pdf` PDF statements are parsed with `pdfplumber`.
 
@@ -92,6 +167,9 @@ Transaction types:
 - `refund` / `credit`: subtracts from spending, so net spend is expenses minus refunds/merchant credits.
 - `debt_payment`: cash leaving chequing to pay a credit card or similar debt; ignored for spending because the card purchases are already counted.
 - `transfer`: movement between your own accounts; ignored for spending and income.
+- `reimbursement`: friend payback, pass-through purchase reimbursement, or merchant credit that should not be income. Costco credits and known friend-paid transactions land here by default.
+- `stored_value_reload`: large reload transactions such as PayPower loads at Food Basics/Sobeys; ignored for spending because the later card payments/purchases are the economic activity to reconcile.
+- `manual_review`: ambiguous cash-account activity that needs a human decision before it becomes income, transfer, reimbursement, or expense.
 - `income`: true inflow such as employment income or rent collected.
 
 For whole-person reporting, internal transfers are not income. They can still be useful for account-level cash flow, but they should not inflate total income or reduce spending.
@@ -100,13 +178,13 @@ For whole-person reporting, internal transfers are not income. They can still be
 
 Merchant rules live in `rules/merchant_rules.yml`. You can edit the file directly or use the Streamlit `Uncategorized` page to save new rules.
 
-After editing `rules/merchant_rules.yml` by hand, reapply the rules to transactions already in DuckDB:
+If you save a rule from the Streamlit `Merchant Rules` page, the app refreshes existing rows for you.
+
+After changing transaction-type logic, reclassify existing DuckDB rows:
 
 ```bash
-python src/categorize.py --refresh-db
+python src/finance.py refresh --admin
 ```
-
-If you save a rule from the Streamlit `Uncategorized` page, the app refreshes existing rows for you.
 
 The dashboard `Merchant Rules` page supports custom categories and optional subcategories. Leave subcategory blank when it does not add useful detail.
 

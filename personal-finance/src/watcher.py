@@ -10,15 +10,18 @@ from ingest import ingest_file
 from paths import TO_IMPORT_DIR, ensure_project_dirs
 
 
-class CsvImportHandler(FileSystemEventHandler):
+class StatementImportHandler(FileSystemEventHandler):
+    def __init__(self, admin: bool = False) -> None:
+        self.admin = admin
+
     def on_created(self, event) -> None:
         if event.is_directory:
             return
         path = Path(event.src_path)
-        if path.suffix.lower() != ".csv":
+        if path.suffix.lower() not in {".csv", ".pdf"}:
             return
         wait_until_ready(path)
-        result = ingest_file(path)
+        result = ingest_file(path, admin=self.admin)
         if result["status"] == "processed":
             print(f"Processed {result['file']}: {result['rows_inserted']}/{result['rows_seen']} new rows.")
         else:
@@ -44,19 +47,16 @@ def wait_until_ready(path: Path, timeout_seconds: int = 30) -> None:
         time.sleep(0.5)
 
 
-def main() -> None:
+def watch_imports(admin: bool = False) -> None:
     ensure_project_dirs()
     observer = Observer()
-    observer.schedule(CsvImportHandler(), str(TO_IMPORT_DIR), recursive=False)
+    observer.schedule(StatementImportHandler(admin=admin), str(TO_IMPORT_DIR), recursive=False)
     observer.start()
-    print(f"Watching {TO_IMPORT_DIR} for CSV files. Press Ctrl+C to stop.")
+    mode = "admin" if admin else "generic"
+    print(f"Watching {TO_IMPORT_DIR} for CSV/PDF files in {mode} mode. Press Ctrl+C to stop.")
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
-
-
-if __name__ == "__main__":
-    main()

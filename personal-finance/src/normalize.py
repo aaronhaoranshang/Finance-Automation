@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 import re
 from datetime import datetime
 from pathlib import Path
@@ -10,12 +11,151 @@ import pandas as pd
 import yaml
 
 from categorize import categorize_transactions, normalize_merchant_text
-from paths import SOURCE_RULES_PATH
+from paths import ADMIN_CLASSIFICATION_RULES_PATH, ADMIN_SOURCE_RULES_PATH, SOURCE_RULES_PATH
 
 
-def load_source_rules(path: Path = SOURCE_RULES_PATH) -> dict[str, Any]:
+def load_source_rules(path: Path = SOURCE_RULES_PATH, admin: bool = False, admin_path: Path = ADMIN_SOURCE_RULES_PATH) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle) or {"sources": {}}
+        rules = yaml.safe_load(handle) or {"sources": {}}
+    if admin:
+        if not admin_path.exists():
+            raise FileNotFoundError(
+                f"Admin source rules not found at {admin_path}. "
+                "Create the file or run without --admin for generic source labels."
+            )
+        with admin_path.open("r", encoding="utf-8") as handle:
+            rules = merge_nested_dict(rules, yaml.safe_load(handle) or {})
+    return rules
+
+
+def merge_nested_dict(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_nested_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+BASE_CLASSIFICATION_RULES: dict[str, Any] = {
+    "payment_patterns": [
+        "PAYMENT",
+        "PAYMENTS",
+        "PMT",
+        "PAIEMENT",
+        "BANQUE",
+        "THANK YOU",
+        "TELEPAYMENTS",
+        "AUTOPAY",
+        "AUTO PAY",
+        "ONLINE PAYMENT",
+        "MOBILE PAYMENT",
+        "PAYMENT FROM",
+    ],
+    "debt_payment_patterns": [
+        "ONLINE BANKING TRANSFER",
+        "BILL PAYMENT",
+        "CREDIT CARD/LOC PAY",
+        "CREDIT CARD",
+        "MASTERCARD",
+        "VISA",
+        "AMEX",
+        "AMERICAN EXPRESS",
+    ],
+    "payment_source_patterns": [
+        "RBC",
+        "ROYAL BANK",
+        "SCOTIABANK",
+        "BMO",
+        "CIBC",
+        "TD",
+        "TANGERINE",
+        "PC FINANCIAL",
+    ],
+    "refund_patterns": [
+        "REFUND",
+        "RETURN",
+        "RETURNED",
+        "REBATE",
+        "REVERSAL",
+        "CREDIT VOUCHER",
+        "CREDIT ADJUSTMENT",
+        "ADJUSTMENT",
+    ],
+    "income_patterns": [
+        "PAYROLL",
+        "SALARY",
+        "DIRECT DEPOSIT",
+        "EI CANADA",
+        "GST",
+        "HST",
+        "CRA",
+        "CANADA",
+        "CHEXY",
+        "RENT",
+    ],
+    "self_transfer_patterns": [
+        "CUSTOMER TRANSFER",
+        "INTERNAL TRANSFER",
+        "ACCOUNT TRANSFER",
+        "INVESTMENT",
+        "INTER-FI FUND",
+    ],
+    "reimbursement_patterns": [],
+    "refund_reimbursement_patterns": [],
+    "stored_value_reload": {
+        "minimum_amount": None,
+        "merchants": [],
+    },
+    "manual_review_patterns": [
+        "MISCELLANEOUS PAYMENT",
+        "ABM DEPOSIT",
+        "ROYAL FOREIGN EXCHANGE DEPOSIT",
+    ],
+}
+
+
+def load_classification_rules(admin: bool = False, path: Path | None = None) -> dict[str, Any]:
+    rules = deepcopy(BASE_CLASSIFICATION_RULES)
+    overlay_path = path or ADMIN_CLASSIFICATION_RULES_PATH
+    if admin:
+        if not overlay_path.exists():
+            raise FileNotFoundError(
+                f"Admin classification rules not found at {overlay_path}. "
+                "Create the file or run without --admin for generic rules."
+            )
+        with overlay_path.open("r", encoding="utf-8") as handle:
+            rules = merge_classification_rules(rules, yaml.safe_load(handle) or {})
+    return normalize_classification_rules(rules)
+
+
+def merge_classification_rules(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in overlay.items():
+        if key == "stored_value_reload" and isinstance(value, dict):
+            stored_value_rules = merged.setdefault("stored_value_reload", {})
+            stored_value_rules.update({k: v for k, v in value.items() if k != "merchants"})
+            stored_value_rules["merchants"] = [
+                *stored_value_rules.get("merchants", []),
+                *value.get("merchants", []),
+            ]
+        elif isinstance(value, list):
+            merged[key] = [*merged.get(key, []), *value]
+        else:
+            merged[key] = value
+    return merged
+
+
+def normalize_classification_rules(rules: dict[str, Any]) -> dict[str, Any]:
+    normalized = deepcopy(rules)
+    for key, value in list(normalized.items()):
+        if isinstance(value, list):
+            normalized[key] = [str(item).upper() for item in value]
+
+    stored_value_rules = normalized.setdefault("stored_value_reload", {})
+    stored_value_rules["merchants"] = [str(item).upper() for item in stored_value_rules.get("merchants", [])]
+    return normalized
 
 
 def read_csv_flex(path: Path) -> pd.DataFrame:
@@ -82,7 +222,13 @@ def detect_source(df: pd.DataFrame, file_path: Path, source_rules: dict[str, Any
     raise ValueError(f"Could not detect source for {file_path.name}. Columns: {sorted(columns)}")
 
 
-def normalize_transactions(df: pd.DataFrame, source_name: str, rule: dict[str, Any], source_file: str) -> pd.DataFrame:
+def normalize_transactions(
+    df: pd.DataFrame,
+    source_name: str,
+    rule: dict[str, Any],
+    source_file: str,
+    classification_rules: dict[str, Any] | None = None,
+) -> pd.DataFrame:
     normalized = pd.DataFrame()
     normalized["transaction_date"] = parse_date(get_required_column(df, rule["date_column"]))
     normalized["posted_date"] = parse_date(get_first_available_column(df, optional_column_names(rule, "posted_date")))
@@ -93,10 +239,13 @@ def normalize_transactions(df: pd.DataFrame, source_name: str, rule: dict[str, A
     normalized["currency"] = rule.get("currency", "CAD")
     normalized["source_file"] = source_file
     normalized["ingested_at"] = datetime.now().replace(microsecond=0)
-    normalized["transaction_type"] = normalized.apply(classify_transaction, axis=1)
+    classification_rules = load_classification_rules() if classification_rules is None else classification_rules
+    normalized["transaction_type"] = normalized.apply(lambda row: classify_transaction(row, classification_rules), axis=1)
+    normalized["scope"] = rule.get("default_scope", "personal")
 
     normalized["transaction_id"] = build_transaction_ids(normalized)
     normalized = categorize_transactions(normalized)
+    normalized = apply_transaction_type_defaults(normalized)
     return normalized[
         [
             "transaction_id",
@@ -108,6 +257,7 @@ def normalize_transactions(df: pd.DataFrame, source_name: str, rule: dict[str, A
             "merchant_clean",
             "amount",
             "transaction_type",
+            "scope",
             "currency",
             "category",
             "subcategory",
@@ -258,81 +408,8 @@ def parse_amount(series: pd.Series) -> pd.Series:
     return cleaned.map(convert).round(2)
 
 
-PAYMENT_PATTERNS = [
-    "PAYMENT",
-    "PAYMENTS",
-    "PMT",
-    "PAIEMENT",
-    "BANQUE",
-    "THANK YOU",
-    "TELEPAYMENTS",
-    "AUTOPAY",
-    "AUTO PAY",
-    "ONLINE PAYMENT",
-    "MOBILE PAYMENT",
-    "PAYMENT FROM",
-]
-
-DEBT_PAYMENT_PATTERNS = [
-    "ONLINE BANKING TRANSFER",
-    "BILL PAYMENT",
-    "CREDIT CARD/LOC PAY",
-    "CREDIT CARD",
-    "MASTERCARD",
-    "VISA",
-    "AMEX",
-    "AMERICAN EXPRESS",
-]
-
-PAYMENT_SOURCE_PATTERNS = [
-    "RBC",
-    "ROYAL BANK",
-    "SCOTIABANK",
-    "BMO",
-    "CIBC",
-    "TD",
-    "TANGERINE",
-    "PC FINANCIAL",
-]
-
-REFUND_PATTERNS = [
-    "REFUND",
-    "RETURN",
-    "RETURNED",
-    "REBATE",
-    "REVERSAL",
-    "CREDIT VOUCHER",
-    "CREDIT ADJUSTMENT",
-    "ADJUSTMENT",
-]
-
-INCOME_PATTERNS = [
-    "PAYROLL",
-    "SALARY",
-    "DIRECT DEPOSIT",
-    "EI CANADA",
-    "GST",
-    "HST",
-    "CRA",
-    "CANADA",
-    "CHEXY",
-    "RENT",
-]
-
-TRANSFER_PATTERNS = [
-    "AARON SHANG",
-    "HAORAN SHANG",
-    "E-TRANSFER",
-    "ETRANSFER",
-    "TRANSFER",
-    "CUSTOMER TRANSFER",
-    "INVESTMENT",
-    "WEALTHSIMPLE",
-    "INTER-FI FUND",
-]
-
-
-def classify_transaction(row: pd.Series) -> str:
+def classify_transaction(row: pd.Series, classification_rules: dict[str, Any] | None = None) -> str:
+    rules = load_classification_rules() if classification_rules is None else classification_rules
     amount = float(row["amount"])
     merchant = str(row["merchant_raw"]).upper()
     merchant_words = set(re.sub(r"[^A-Z0-9 ]+", " ", merchant).split())
@@ -340,26 +417,51 @@ def classify_transaction(row: pd.Series) -> str:
     cash_account = is_cash_account(account)
 
     if amount > 0:
-        if cash_account and any(pattern in merchant for pattern in DEBT_PAYMENT_PATTERNS):
+        if is_stored_value_reload(merchant, amount, rules):
+            return "stored_value_reload"
+        if any(pattern in merchant for pattern in rules["reimbursement_patterns"]):
+            return "reimbursement"
+        if cash_account and any(pattern in merchant for pattern in rules["debt_payment_patterns"]):
             return "debt_payment"
-        if any(pattern in merchant for pattern in TRANSFER_PATTERNS):
+        if is_self_transfer(merchant, rules):
             return "transfer"
+        if "E-TRANSFER" in merchant or "ETRANSFER" in merchant:
+            return "manual_review"
         return "expense"
     if amount == 0:
         return "zero"
-    if any(pattern in merchant for pattern in REFUND_PATTERNS):
+    if any(pattern in merchant for pattern in rules["reimbursement_patterns"] + rules["refund_reimbursement_patterns"]):
+        return "reimbursement"
+    if "TAX REFUND" in merchant or "GST" in merchant or "PROV/LOCAL GVT" in merchant:
+        return "income"
+    if any(pattern in merchant for pattern in rules["refund_patterns"]):
         return "refund"
-    if cash_account and any(pattern in merchant for pattern in INCOME_PATTERNS):
+    if cash_account and any(pattern in merchant for pattern in rules["income_patterns"]):
         return "income"
-    if any(pattern in merchant for pattern in TRANSFER_PATTERNS):
+    if is_self_transfer(merchant, rules):
         return "transfer"
-    if any(pattern in merchant for pattern in PAYMENT_PATTERNS):
+    if "E-TRANSFER" in merchant or "ETRANSFER" in merchant:
+        return "manual_review"
+    if any(pattern in merchant for pattern in rules["payment_patterns"]):
         return "payment"
-    if any(pattern in merchant_words for pattern in PAYMENT_SOURCE_PATTERNS):
+    if any(pattern in merchant_words for pattern in rules["payment_source_patterns"]):
         return "payment"
+    if cash_account and any(pattern in merchant for pattern in rules["manual_review_patterns"]):
+        return "manual_review"
     if cash_account:
-        return "income"
+        return "manual_review"
     return "credit"
+
+
+def is_stored_value_reload(merchant: str, amount: float, rules: dict[str, Any]) -> bool:
+    stored_value_rules = rules.get("stored_value_reload", {})
+    minimum_amount = stored_value_rules.get("minimum_amount")
+    merchants = stored_value_rules.get("merchants", [])
+    return minimum_amount is not None and amount >= float(minimum_amount) and any(pattern in merchant for pattern in merchants)
+
+
+def is_self_transfer(merchant: str, rules: dict[str, Any]) -> bool:
+    return any(pattern in merchant for pattern in rules["self_transfer_patterns"])
 
 
 def is_cash_account(account: str) -> bool:
@@ -374,6 +476,30 @@ def is_cash_account(account: str) -> bool:
             "NEO",
         ]
     )
+
+
+TRANSACTION_TYPE_DEFAULTS = {
+    "reimbursement": ("Reimbursement", "Friend Payback"),
+    "stored_value_reload": ("Cash Movement", "PayPower Reload"),
+    "manual_review": ("Manual Review", ""),
+    "payment": ("Debt Payment", "Credit Card Payment"),
+    "debt_payment": ("Debt Payment", "Credit Card Payment"),
+    "transfer": ("Transfer", "Internal Transfer"),
+    "income": ("Income", ""),
+    "refund": ("Reimbursement", "Refund"),
+}
+
+
+def apply_transaction_type_defaults(df: pd.DataFrame) -> pd.DataFrame:
+    updated = df.copy()
+    for transaction_type, (category, subcategory) in TRANSACTION_TYPE_DEFAULTS.items():
+        mask = (
+            updated["transaction_type"].eq(transaction_type)
+            & (updated["category"].isna() | updated["category"].eq("") | updated["category"].eq("Uncategorized"))
+        )
+        updated.loc[mask, "category"] = category
+        updated.loc[mask, "subcategory"] = subcategory
+    return updated
 
 
 def build_transaction_ids(df: pd.DataFrame) -> pd.Series:

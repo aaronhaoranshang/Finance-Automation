@@ -5,8 +5,10 @@ import plotly.express as px
 import streamlit as st
 
 from categorize import categorize_transactions, load_rules, save_rule, suggest_rule
-from db import connect, load_import_log, load_transactions, update_categorizations
+from db import connect, load_import_log, load_transactions, update_categorizations, update_transaction_fields
+from ingest import ingest_file, preview_file, supported_import_files, unique_destination
 from normalize import classify_transaction
+from paths import ADMIN_CLASSIFICATION_RULES_PATH, ADMIN_SOURCE_RULES_PATH, TO_IMPORT_DIR, ensure_project_dirs
 
 
 DEFAULT_CATEGORIES = [
@@ -24,6 +26,8 @@ DEFAULT_CATEGORIES = [
     "Income",
     "Interest",
     "Reimbursement",
+    "Cash Movement",
+    "Manual Review",
     "Transfer",
     "Debt Payment",
     "Other",
@@ -44,13 +48,30 @@ DEFAULT_SUBCATEGORIES = {
     "Income": ["Salary", "Rent", "Bonus"],
     "Interest": ["Savings Interest", "GIC Interest"],
     "Reimbursement": ["Friend Payback", "Refund"],
+    "Cash Movement": ["PayPower Reload"],
+    "Manual Review": [],
     "Transfer": ["Internal Transfer"],
     "Debt Payment": ["Credit Card Payment", "Loan Payment"],
     "Other": [],
 }
 
 SPEND_TYPES = ["expense", "refund", "credit"]
-IGNORED_MOVEMENT_TYPES = ["payment", "debt_payment", "transfer"]
+IGNORED_MOVEMENT_TYPES = ["payment", "debt_payment", "transfer", "reimbursement", "stored_value_reload"]
+REVIEW_TYPES = ["manual_review"]
+TRANSACTION_TYPES = [
+    "expense",
+    "refund",
+    "credit",
+    "income",
+    "payment",
+    "debt_payment",
+    "transfer",
+    "reimbursement",
+    "stored_value_reload",
+    "manual_review",
+    "zero",
+]
+SCOPES = ["personal", "shared"]
 
 DRILLDOWN_METRICS = {
     "Gross Spend": ["expense"],
@@ -60,7 +81,10 @@ DRILLDOWN_METRICS = {
     "Card Payments": ["payment"],
     "Debt Payments": ["debt_payment"],
     "Transfers": ["transfer"],
-    "Ignored Movement": ["payment", "debt_payment", "transfer"],
+    "Reimbursements": ["reimbursement"],
+    "Stored Value Reloads": ["stored_value_reload"],
+    "Needs Review": ["manual_review"],
+    "Ignored Movement": IGNORED_MOVEMENT_TYPES,
 }
 
 
@@ -78,6 +102,9 @@ def money_frame(df: pd.DataFrame) -> pd.DataFrame:
             framed.loc[missing_type, "transaction_type"] = framed.loc[missing_type].apply(classify_transaction, axis=1)
 
     framed["amount"] = pd.to_numeric(framed["amount"], errors="coerce").fillna(0)
+    if "scope" not in framed.columns:
+        framed["scope"] = "personal"
+    framed["scope"] = framed["scope"].fillna("personal").replace("", "personal")
     framed["gross_spend"] = framed["amount"].where(framed["transaction_type"] == "expense", 0)
     framed["refund_credit"] = framed["amount"].where(framed["transaction_type"].isin(["refund", "credit"]), 0)
     framed["refund_credit_abs"] = framed["refund_credit"].abs()
@@ -86,7 +113,16 @@ def money_frame(df: pd.DataFrame) -> pd.DataFrame:
     framed["payment_amount"] = framed["amount"].where(framed["transaction_type"] == "payment", 0).abs()
     framed["debt_payment_amount"] = framed["amount"].where(framed["transaction_type"] == "debt_payment", 0).abs()
     framed["transfer_amount"] = framed["amount"].where(framed["transaction_type"] == "transfer", 0).abs()
-    framed["ignored_movement"] = framed["payment_amount"] + framed["debt_payment_amount"] + framed["transfer_amount"]
+    framed["reimbursement_amount"] = framed["amount"].where(framed["transaction_type"] == "reimbursement", 0).abs()
+    framed["stored_value_reload_amount"] = framed["amount"].where(framed["transaction_type"] == "stored_value_reload", 0).abs()
+    framed["manual_review_amount"] = framed["amount"].where(framed["transaction_type"] == "manual_review", 0).abs()
+    framed["ignored_movement"] = (
+        framed["payment_amount"]
+        + framed["debt_payment_amount"]
+        + framed["transfer_amount"]
+        + framed["reimbursement_amount"]
+        + framed["stored_value_reload_amount"]
+    )
     framed["month"] = framed["transaction_date"].dt.to_period("M").astype(str)
     framed["display_amount"] = framed["amount"].abs()
     framed["category"] = framed["category"].fillna("Uncategorized").replace("", "Uncategorized")
@@ -112,6 +148,21 @@ def refresh_categories() -> None:
     finally:
         con.close()
     st.cache_data.clear()
+
+
+def admin_rules_available() -> bool:
+    return ADMIN_CLASSIFICATION_RULES_PATH.exists() and ADMIN_SOURCE_RULES_PATH.exists()
+
+
+def import_mode_control() -> bool:
+    if not admin_rules_available():
+        st.caption("Import mode: Generic")
+        return False
+    return st.toggle(
+        "Use private local rules",
+        value=False,
+        help="Keeps shared installs generic by default. Turn this on only for a local customized setup.",
+    )
 
 
 def available_categories(df: pd.DataFrame) -> list[str]:
@@ -140,6 +191,9 @@ def filter_panel(df: pd.DataFrame) -> pd.DataFrame:
         accounts = sorted(df["account_name"].dropna().unique().tolist())
         selected_accounts = st.multiselect("Accounts", accounts, default=accounts)
 
+        scopes = sorted(df["scope"].dropna().unique().tolist())
+        selected_scopes = st.multiselect("Scope", scopes, default=scopes)
+
         types = sorted(df["transaction_type"].dropna().unique().tolist())
         selected_types = st.multiselect("Transaction Types", types, default=types)
 
@@ -148,6 +202,8 @@ def filter_panel(df: pd.DataFrame) -> pd.DataFrame:
         filtered = filtered[filtered["month"].isin(selected_months)]
     if selected_accounts:
         filtered = filtered[filtered["account_name"].isin(selected_accounts)]
+    if selected_scopes:
+        filtered = filtered[filtered["scope"].isin(selected_scopes)]
     if selected_types:
         filtered = filtered[filtered["transaction_type"].isin(selected_types)]
     return filtered
@@ -166,6 +222,9 @@ def summary_by_month(df: pd.DataFrame) -> pd.DataFrame:
             card_payments=("payment_amount", "sum"),
             debt_payments=("debt_payment_amount", "sum"),
             transfers=("transfer_amount", "sum"),
+            reimbursements=("reimbursement_amount", "sum"),
+            stored_value_reloads=("stored_value_reload_amount", "sum"),
+            manual_review=("manual_review_amount", "sum"),
             ignored_movement=("ignored_movement", "sum"),
             transactions=("transaction_id", "count"),
         )
@@ -178,16 +237,18 @@ def metric_row(df: pd.DataFrame) -> None:
     refunds = float(df["refund_credit_abs"].sum())
     net_spend = float(df["net_spend"].sum())
     income = float(df["income_amount"].sum())
+    manual_review = float(df["manual_review_amount"].sum())
     ignored = float(df["ignored_movement"].sum())
     uncategorized = int(((df["category"] == "Uncategorized") & df["transaction_type"].isin(SPEND_TYPES)).sum())
 
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
     col1.metric("Net Spend", money(net_spend))
     col2.metric("Gross Spend", money(gross_spend))
     col3.metric("Refunds/Credits", money(refunds))
     col4.metric("Income", money(income))
-    col5.metric("Ignored Movement", money(ignored))
-    col6.metric("Uncategorized", f"{uncategorized:,}")
+    col5.metric("Needs Review", money(manual_review))
+    col6.metric("Ignored Movement", money(ignored))
+    col7.metric("Uncategorized", f"{uncategorized:,}")
 
 
 def money(value: float) -> str:
@@ -205,12 +266,19 @@ def render_overview(df: pd.DataFrame) -> None:
 
     chart_data = monthly.melt(
         id_vars="month",
-        value_vars=["gross_spend", "refunds_credits", "net_spend", "income", "ignored_movement"],
+        value_vars=[
+            "gross_spend",
+            "refunds_credits",
+            "net_spend",
+            "income",
+            "manual_review",
+            "ignored_movement",
+        ],
         var_name="metric",
         value_name="amount",
     )
-    st.plotly_chart(px.bar(chart_data, x="month", y="amount", color="metric", barmode="group"), use_container_width=True)
-    st.dataframe(monthly, use_container_width=True, hide_index=True)
+    st.plotly_chart(px.bar(chart_data, x="month", y="amount", color="metric", barmode="group"), width="stretch")
+    st.dataframe(monthly, width="stretch", hide_index=True)
 
     account_summary = (
         df.groupby(["account_name", "transaction_type"], as_index=False)
@@ -218,7 +286,7 @@ def render_overview(df: pd.DataFrame) -> None:
         .sort_values(["account_name", "transaction_type"])
     )
     st.subheader("Account Activity")
-    st.dataframe(account_summary, use_container_width=True, hide_index=True)
+    st.dataframe(account_summary, width="stretch", hide_index=True)
 
 
 def render_monthly_detail(df: pd.DataFrame) -> None:
@@ -236,8 +304,8 @@ def render_monthly_detail(df: pd.DataFrame) -> None:
 
     with tab1:
         category = spend_df.groupby("category", as_index=False)["net_spend"].sum().sort_values("net_spend", ascending=False)
-        st.plotly_chart(px.bar(category, x="category", y="net_spend"), use_container_width=True)
-        st.dataframe(category, use_container_width=True, hide_index=True)
+        st.plotly_chart(px.bar(category, x="category", y="net_spend"), width="stretch")
+        st.dataframe(category, width="stretch", hide_index=True)
 
     with tab2:
         subcategory = (
@@ -246,7 +314,7 @@ def render_monthly_detail(df: pd.DataFrame) -> None:
             .sum()
             .sort_values("net_spend", ascending=False)
         )
-        st.dataframe(subcategory, use_container_width=True, hide_index=True)
+        st.dataframe(subcategory, width="stretch", hide_index=True)
 
     with tab3:
         merchants = (
@@ -254,7 +322,7 @@ def render_monthly_detail(df: pd.DataFrame) -> None:
             .agg(net_spend=("net_spend", "sum"), transactions=("transaction_id", "count"))
             .sort_values("net_spend", ascending=False)
         )
-        st.dataframe(merchants, use_container_width=True, hide_index=True)
+        st.dataframe(merchants, width="stretch", hide_index=True)
 
     with tab4:
         accounts = (
@@ -262,19 +330,19 @@ def render_monthly_detail(df: pd.DataFrame) -> None:
             .agg(amount=("display_amount", "sum"), transactions=("transaction_id", "count"))
             .sort_values(["account_name", "transaction_type"])
         )
-        st.dataframe(accounts, use_container_width=True, hide_index=True)
+        st.dataframe(accounts, width="stretch", hide_index=True)
 
     with tab5:
         render_transaction_table(month_df)
 
 
 def render_reconciliation(df: pd.DataFrame) -> None:
-    st.title("Reconciliation")
-    st.caption("Use these tables to compare against your manual tracker by month, account, category, and source file.")
+    st.title("Audit")
+    st.caption("Use these tables to check totals by month, account, source file, and transaction type.")
 
     monthly = summary_by_month(df)
     st.subheader("Monthly Totals")
-    st.dataframe(monthly, use_container_width=True, hide_index=True)
+    st.dataframe(monthly, width="stretch", hide_index=True)
 
     by_account_month = (
         df.groupby(["month", "account_name"], as_index=False)
@@ -286,13 +354,17 @@ def render_reconciliation(df: pd.DataFrame) -> None:
             payments=("payment_amount", "sum"),
             debt_payments=("debt_payment_amount", "sum"),
             transfers=("transfer_amount", "sum"),
+            reimbursements=("reimbursement_amount", "sum"),
+            stored_value_reloads=("stored_value_reload_amount", "sum"),
+            manual_review=("manual_review_amount", "sum"),
+            ignored_movement=("ignored_movement", "sum"),
             file_net=("amount", "sum"),
             transactions=("transaction_id", "count"),
         )
         .sort_values(["month", "account_name"])
     )
     st.subheader("By Account And Month")
-    st.dataframe(by_account_month, use_container_width=True, hide_index=True)
+    st.dataframe(by_account_month, width="stretch", hide_index=True)
 
     by_source = (
         df.groupby(["source_file", "account_name"], as_index=False)
@@ -301,6 +373,9 @@ def render_reconciliation(df: pd.DataFrame) -> None:
             last_date=("transaction_date", "max"),
             net_spend=("net_spend", "sum"),
             income=("income_amount", "sum"),
+            reimbursements=("reimbursement_amount", "sum"),
+            stored_value_reloads=("stored_value_reload_amount", "sum"),
+            manual_review=("manual_review_amount", "sum"),
             ignored_movement=("ignored_movement", "sum"),
             file_net=("amount", "sum"),
             transactions=("transaction_id", "count"),
@@ -308,7 +383,7 @@ def render_reconciliation(df: pd.DataFrame) -> None:
         .sort_values(["last_date", "source_file"])
     )
     st.subheader("By Source File")
-    st.dataframe(by_source, use_container_width=True, hide_index=True)
+    st.dataframe(by_source, width="stretch", hide_index=True)
 
     csv = by_account_month.to_csv(index=False).encode("utf-8")
     st.download_button("Download Account-Month CSV", csv, "account_month_reconciliation.csv", "text/csv")
@@ -345,6 +420,12 @@ def render_drilldown(df: pd.DataFrame) -> None:
         total = drill_df["debt_payment_amount"].sum()
     elif metric == "Transfers":
         total = drill_df["transfer_amount"].sum()
+    elif metric == "Reimbursements":
+        total = drill_df["reimbursement_amount"].sum()
+    elif metric == "Stored Value Reloads":
+        total = drill_df["stored_value_reload_amount"].sum()
+    elif metric == "Needs Review":
+        total = drill_df["manual_review_amount"].sum()
     else:
         total = drill_df["ignored_movement"].sum()
 
@@ -363,15 +444,15 @@ def render_drilldown(df: pd.DataFrame) -> None:
         .sort_values("amount", ascending=False)
     )
     st.subheader("By Type")
-    st.dataframe(by_type, use_container_width=True, hide_index=True)
+    st.dataframe(by_type, width="stretch", hide_index=True)
 
     by_account = (
-        drill_df.groupby("account_name", as_index=False)
+        drill_df.groupby(["account_name", "scope"], as_index=False)
         .agg(amount=("display_amount", "sum"), transactions=("transaction_id", "count"))
         .sort_values("amount", ascending=False)
     )
     st.subheader("By Account")
-    st.dataframe(by_account, use_container_width=True, hide_index=True)
+    st.dataframe(by_account, width="stretch", hide_index=True)
 
     st.subheader("Transactions")
     render_transaction_table(drill_df)
@@ -392,8 +473,8 @@ def render_category_breakdown(df: pd.DataFrame) -> None:
         .agg(net_spend=("net_spend", "sum"), transactions=("transaction_id", "count"))
         .sort_values("net_spend", ascending=False)
     )
-    st.plotly_chart(px.bar(category_totals, x="category", y="net_spend"), use_container_width=True)
-    st.dataframe(category_totals, use_container_width=True, hide_index=True)
+    st.plotly_chart(px.bar(category_totals, x="category", y="net_spend"), width="stretch")
+    st.dataframe(category_totals, width="stretch", hide_index=True)
 
 
 def render_top_merchants(df: pd.DataFrame) -> None:
@@ -405,8 +486,8 @@ def render_top_merchants(df: pd.DataFrame) -> None:
         .sort_values("net_spend", ascending=False)
         .head(50)
     )
-    st.plotly_chart(px.bar(merchant_totals, x="net_spend", y="merchant_clean", orientation="h"), use_container_width=True)
-    st.dataframe(merchant_totals, use_container_width=True, hide_index=True)
+    st.plotly_chart(px.bar(merchant_totals, x="net_spend", y="merchant_clean", orientation="h"), width="stretch")
+    st.dataframe(merchant_totals, width="stretch", hide_index=True)
 
 
 def render_recurring(df: pd.DataFrame) -> None:
@@ -427,7 +508,7 @@ def render_recurring(df: pd.DataFrame) -> None:
     recurring = recurring[(recurring["transactions"] >= 3) & (recurring["months"] >= 2)].sort_values(
         ["months", "total_spend"], ascending=False
     )
-    st.dataframe(recurring, use_container_width=True, hide_index=True)
+    st.dataframe(recurring, width="stretch", hide_index=True)
 
 
 def render_uncategorized(df: pd.DataFrame) -> None:
@@ -460,7 +541,7 @@ def render_uncategorized(df: pd.DataFrame) -> None:
                 matching_rows[
                     ["transaction_date", "account_name", "merchant_raw", "amount", "transaction_type", "source_file"]
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -504,12 +585,134 @@ def render_uncategorized(df: pd.DataFrame) -> None:
         if not rules:
             st.info("No merchant rules yet.")
         else:
-            st.dataframe(pd.DataFrame([rule.__dict__ for rule in rules]), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame([rule.__dict__ for rule in rules]), width="stretch", hide_index=True)
+
+
+def render_review_queue(df: pd.DataFrame) -> None:
+    st.title("Review Queue")
+    review_df = df[
+        df["transaction_type"].isin(REVIEW_TYPES)
+        | df["category"].isin(["Manual Review", "Uncategorized"])
+    ].copy()
+
+    if review_df.empty:
+        st.success("No manual review transactions match the current filters.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Needs Review", money(float(review_df["display_amount"].sum())))
+    col2.metric("Transactions", f"{len(review_df):,}")
+    col3.metric("Accounts", f"{review_df['account_name'].nunique():,}")
+
+    type_summary = (
+        review_df.groupby(["transaction_type", "category"], as_index=False)
+        .agg(amount=("display_amount", "sum"), transactions=("transaction_id", "count"))
+        .sort_values("amount", ascending=False)
+    )
+    st.subheader("Review Summary")
+    st.dataframe(type_summary, width="stretch", hide_index=True)
+
+    st.subheader("Fix One Transaction")
+    render_transaction_editor(review_df, key_prefix="review")
+
+    st.subheader("Transactions")
+    render_transaction_table(review_df)
 
 
 def render_transactions(df: pd.DataFrame) -> None:
     st.title("Transactions")
+    render_transaction_editor(df, key_prefix="transactions")
     render_transaction_table(df)
+
+
+def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
+    if df.empty:
+        st.info("No transactions match the current filters.")
+        return
+
+    editable = df.sort_values(["transaction_date", "account_name", "merchant_raw"], ascending=[False, True, True]).copy()
+    labels = {
+        row.transaction_id: (
+            f"{row.transaction_date} | {row.account_name} | {row.transaction_type} | "
+            f"{money(float(abs(row.amount)))} | {str(row.merchant_raw)[:80]}"
+        )
+        for row in editable.itertuples()
+    }
+
+    selected_id = st.selectbox(
+        "Select Transaction",
+        editable["transaction_id"].tolist(),
+        format_func=lambda transaction_id: labels.get(transaction_id, transaction_id),
+        key=f"{key_prefix}_transaction_select",
+    )
+    row = editable[editable["transaction_id"] == selected_id].iloc[0]
+
+    with st.form(f"{key_prefix}_transaction_editor"):
+        col1, col2, col3 = st.columns(3)
+        col1.text_input("Date", value=str(row["transaction_date"]), disabled=True)
+        col2.text_input("Account", value=str(row["account_name"]), disabled=True)
+        col3.text_input("Amount", value=money(float(row["amount"])), disabled=True)
+
+        merchant_clean = st.text_input("Clean Merchant", value=str(row.get("merchant_clean") or row.get("merchant_raw") or ""))
+
+        type_options = sorted({*TRANSACTION_TYPES, *df["transaction_type"].dropna().astype(str).tolist()})
+        current_type = str(row.get("transaction_type") or "expense")
+        if current_type not in type_options:
+            type_options.append(current_type)
+        transaction_type = st.selectbox(
+            "Transaction Type",
+            type_options,
+            index=type_options.index(current_type),
+        )
+
+        current_scope = str(row.get("scope") or "personal")
+        scope_options = list(dict.fromkeys([current_scope, *SCOPES]))
+        scope = st.selectbox("Scope", scope_options, index=0)
+
+        categories = available_categories(df)
+        current_category = str(row.get("category") or "Uncategorized")
+        if current_category not in categories:
+            categories.insert(0, current_category)
+        selected_category = st.selectbox("Category", categories, index=categories.index(current_category))
+        custom_category = ""
+        if selected_category == "Custom":
+            custom_category = st.text_input("Custom Category")
+        final_category = custom_category.strip() if selected_category == "Custom" else selected_category
+
+        subcategory_options = [""] + available_subcategories(final_category, df)
+        current_subcategory = str(row.get("subcategory") or "")
+        if current_subcategory and current_subcategory not in subcategory_options:
+            subcategory_options.append(current_subcategory)
+        selected_subcategory = st.selectbox(
+            "Subcategory Optional",
+            subcategory_options,
+            index=subcategory_options.index(current_subcategory) if current_subcategory in subcategory_options else 0,
+        )
+        custom_subcategory = st.text_input("Custom Subcategory Optional", value="")
+        final_subcategory = custom_subcategory.strip() or selected_subcategory.strip()
+
+        submitted = st.form_submit_button("Save Transaction")
+
+    if submitted:
+        if not final_category:
+            st.error("Category is required. Subcategory can stay blank.")
+            return
+        con = connect()
+        try:
+            update_transaction_fields(
+                con,
+                selected_id,
+                merchant_clean.strip(),
+                transaction_type,
+                scope or "personal",
+                final_category,
+                final_subcategory,
+            )
+        finally:
+            con.close()
+        st.cache_data.clear()
+        st.success("Transaction updated.")
+        st.rerun()
 
 
 def render_transaction_table(df: pd.DataFrame) -> None:
@@ -517,6 +720,7 @@ def render_transaction_table(df: pd.DataFrame) -> None:
         "transaction_date",
         "account_name",
         "transaction_type",
+        "scope",
         "merchant_raw",
         "merchant_clean",
         "category",
@@ -525,17 +729,82 @@ def render_transaction_table(df: pd.DataFrame) -> None:
         "source_file",
     ]
     existing_columns = [column for column in columns if column in df.columns]
-    st.dataframe(df.sort_values("transaction_date", ascending=False)[existing_columns], use_container_width=True, hide_index=True)
+    st.dataframe(df.sort_values("transaction_date", ascending=False)[existing_columns], width="stretch", hide_index=True)
 
 
 def render_imports(import_log: pd.DataFrame) -> None:
     st.title("Imports")
-    st.dataframe(import_log, use_container_width=True, hide_index=True)
+    st.caption("Add CSV/PDF statements, preview totals, then import into the local DuckDB file.")
+    ensure_project_dirs()
+
+    use_admin = import_mode_control()
+
+    uploaded_files = st.file_uploader(
+        "Statement Files",
+        type=["csv", "pdf"],
+        accept_multiple_files=True,
+        help="Files are saved locally to imports/to_import before import.",
+    )
+    if st.button("Add Files", disabled=not uploaded_files):
+        saved_names = []
+        for uploaded_file in uploaded_files:
+            destination = unique_destination(TO_IMPORT_DIR, uploaded_file.name)
+            destination.write_bytes(uploaded_file.getbuffer())
+            saved_names.append(destination.name)
+        st.success(f"Added {len(saved_names)} file(s) to imports/to_import.")
+        st.rerun()
+
+    pending_files = supported_import_files(TO_IMPORT_DIR)
+    st.subheader("Pending Files")
+    if pending_files:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "file": path.name,
+                        "type": path.suffix.lower().lstrip("."),
+                        "size_kb": round(path.stat().st_size / 1024, 1),
+                    }
+                    for path in pending_files
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+        col1, col2 = st.columns(2)
+        if col1.button("Preview Pending Files"):
+            previews = []
+            errors = []
+            for path in pending_files:
+                try:
+                    previews.append(preview_file(path, admin=use_admin).__dict__)
+                except Exception as exc:
+                    errors.append({"file": path.name, "error": str(exc)})
+            if previews:
+                st.dataframe(pd.DataFrame(previews), width="stretch", hide_index=True)
+            if errors:
+                st.error("Some files could not be previewed.")
+                st.dataframe(pd.DataFrame(errors), width="stretch", hide_index=True)
+
+        if col2.button("Import Pending Files"):
+            results = [ingest_file(path, admin=use_admin) for path in pending_files]
+            st.dataframe(pd.DataFrame(results), width="stretch", hide_index=True)
+            st.cache_data.clear()
+            st.success("Import finished.")
+    else:
+        st.info("No pending files. Upload statements above or place them in imports/to_import.")
+
+    st.subheader("Import History")
+    if import_log.empty:
+        st.info("No imports yet on this local install.")
+    else:
+        st.dataframe(import_log, width="stretch", hide_index=True)
 
 
 def render_empty_state() -> None:
     st.title("Personal Finance")
-    st.info("Drop CSV/PDF files into imports/to_import, then run python src/ingest.py.")
+    st.info("Start from the Imports page by uploading CSV/PDF statements. New installs use generic rules by default.")
 
 
 def main() -> None:
@@ -546,23 +815,25 @@ def main() -> None:
     page = st.sidebar.radio(
         "View",
         [
+            "Imports",
             "Overview",
             "Monthly Detail",
-            "Reconciliation",
+            "Audit",
             "Drilldown",
             "Category Breakdown",
             "Top Merchants",
             "Recurring Payments",
+            "Review Queue",
             "Merchant Rules",
             "Transactions",
-            "Imports",
         ],
     )
 
     if df.empty:
-        render_empty_state()
-        if not import_log.empty:
+        if page == "Imports":
             render_imports(import_log)
+        else:
+            render_empty_state()
         return
 
     filtered = filter_panel(df)
@@ -571,7 +842,7 @@ def main() -> None:
         render_overview(filtered)
     elif page == "Monthly Detail":
         render_monthly_detail(filtered)
-    elif page == "Reconciliation":
+    elif page == "Audit":
         render_reconciliation(filtered)
     elif page == "Drilldown":
         render_drilldown(filtered)
@@ -581,6 +852,8 @@ def main() -> None:
         render_top_merchants(filtered)
     elif page == "Recurring Payments":
         render_recurring(filtered)
+    elif page == "Review Queue":
+        render_review_queue(filtered)
     elif page == "Merchant Rules":
         render_uncategorized(filtered)
     elif page == "Transactions":

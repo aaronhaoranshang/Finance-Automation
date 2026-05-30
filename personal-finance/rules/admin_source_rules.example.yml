@@ -1,0 +1,14 @@
+# Copy this to rules/admin_source_rules.yml for private account naming.
+# The real admin_source_rules.yml file is ignored by git.
+sources:
+  rbc_credit_card:
+    account_aliases:
+      "1234": RBC Avion
+      "5678": RBC ION
+  rbc_chequing:
+    account_aliases:
+      "9999": RBC Chequing
+  mbna_9426:
+    account_name: MBNA Card
+  scotia_3128:
+    account_name: Scotia Credit Card

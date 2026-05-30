@@ -6,3 +6,4 @@ watchdog
 plotly
 pyyaml
 pdfplumber
+openpyxl

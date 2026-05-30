@@ -5,6 +5,13 @@ __pycache__/
 
 data/*.duckdb
 data/*.duckdb.wal
+data/manual_reconciliation/
 imports/to_import/*.csv
 imports/processed/*.csv
 imports/failed/*.csv
+rules/admin_classification_rules.yml
+rules/admin_source_rules.yml
+build/
+dist/
+.pyinstaller/
+*.log
