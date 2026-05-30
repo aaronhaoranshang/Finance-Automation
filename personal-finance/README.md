@@ -48,7 +48,7 @@ python src/finance.py dashboard --port 8502           # open the dashboard
 python src/finance.py watch --admin                   # auto-import new CSV/PDF files dropped into imports/to_import
 ```
 
-The preview includes detected account, majority transaction month, processed filename, duplicate count, gross expenses, refunds/credits, payments, reimbursements, stored-value reloads, manual-review amount, net spend, and the file net total for quick checking.
+The preview includes detected account, majority transaction month, processed filename, duplicate count, gross expenses, refunds/credits, payments, reimbursements, prepaid card reloads, needs-review amount, net spend, and the file net total for quick checking.
 
 In development, the DuckDB file is created at `data/finance.duckdb`. In a packaged desktop app, each computer gets its own fresh local data folder:
 
@@ -128,15 +128,15 @@ python run_app.py
 Main pages:
 
 - `Imports`: upload CSV/PDF statements, preview totals, and import into the local database.
-- `Overview`: filtered gross spend, refunds/credits, net spend, income, and ignored movement.
+- `Overview`: filtered gross spend, refunds/credits, net spend, income, and excluded-from-spend movement.
 - `Monthly Detail`: month-level category, subcategory, merchant, account, and transaction drilldowns.
 - `Audit`: account-month and source-file tables for checking imported totals, with CSV download.
-- `Drilldown`: choose a metric such as ignored movement, income, transfers, or refunds and see the exact transactions behind it.
-- `Review Queue`: fix ambiguous rows directly in the dashboard, including transaction type, personal/shared scope, category, and optional subcategory.
+- `Drilldown`: choose a metric such as Excluded From Spend, Income, Internal Transfers, or Refunds/Credits and see the exact transactions behind it.
+- `Review Queue`: fix ambiguous rows directly in the dashboard, including Type, Scope, Category, optional Subcategory, and reusable merchant rules.
 - `Merchant Rules`: uncategorized queue plus flexible rule creation.
 - `Transactions`: raw filtered transaction table plus a single-transaction editor.
 
-Use the sidebar filters to check one month/account/scope/type at a time. Scope defaults to `personal`; switch a transaction to `shared` from the `Review Queue` or `Transactions` page when needed.
+Use the sidebar filters to check one Month, Account, Scope, or Type at a time. Scope defaults to `Personal`; switch a transaction to `Shared` from the `Review Queue` or `Transactions` page when needed.
 
 Processed CSVs are renamed when they move into `imports/processed`, using the account label and the month containing the majority of transactions. Examples:
 
@@ -160,25 +160,28 @@ Current statement mappings:
 
 Amounts are normalized so spending/outflows are positive and credits/payments are negative.
 
-Transaction types:
+Transaction types shown in the app:
 
-- `expense`: included in spending.
-- `payment`: card payment or bill payment; ignored for spending and net owed activity.
-- `refund` / `credit`: subtracts from spending, so net spend is expenses minus refunds/merchant credits.
-- `debt_payment`: cash leaving chequing to pay a credit card or similar debt; ignored for spending because the card purchases are already counted.
-- `transfer`: movement between your own accounts; ignored for spending and income.
-- `reimbursement`: friend payback, pass-through purchase reimbursement, or merchant credit that should not be income. Costco credits and known friend-paid transactions land here by default.
-- `stored_value_reload`: large reload transactions such as PayPower loads at Food Basics/Sobeys; ignored for spending because the later card payments/purchases are the economic activity to reconcile.
-- `manual_review`: ambiguous cash-account activity that needs a human decision before it becomes income, transfer, reimbursement, or expense.
-- `income`: true inflow such as employment income or rent collected.
+- `Expense`: real spending.
+- `Refund`: merchant refund that reduces spending.
+- `Merchant Credit`: statement credit or adjustment that reduces spending.
+- `Card Payment`: payment made to a credit card; ignored for spending to avoid double counting.
+- `Debt Payment`: cash leaving chequing to pay a card, loan, or line of credit; ignored for spending.
+- `Internal Transfer`: movement between your own accounts; ignored for spending and income.
+- `Reimbursement`: friend payback, pass-through purchase reimbursement, or merchant credit that should not be income.
+- `Prepaid Card Reload`: large reload/top-up transaction, such as loading PayPower or another stored-value card; ignored for spending.
+- `Needs Review`: ambiguous cash/e-transfer activity that needs a manual decision.
+- `Income`: true inflow such as payroll, rent collected, interest, or tax refund.
 
 For whole-person reporting, internal transfers are not income. They can still be useful for account-level cash flow, but they should not inflate total income or reduce spending.
 
 ## Configure Merchants
 
-Merchant rules live in `rules/merchant_rules.yml`. You can edit the file directly or use the Streamlit `Uncategorized` page to save new rules.
+Merchant rules live in `rules/merchant_rules.yml`. You can edit the file directly or use the Streamlit `Merchant Rules` page to save new rules.
 
-If you save a rule from the Streamlit `Merchant Rules` page, the app refreshes existing rows for you.
+If you save a rule from the Streamlit `Merchant Rules` page, or save a transaction with `Save as merchant rule and apply to similar merchants` checked, the app refreshes existing rows for you. Rule matching checks the normal merchant text, a compact version, and a noise-stripped version, so one rule like `PHO ANH VU` can match variants such as `PHOANHVU`, `PHO_ANH_VU`, `PHO ANH VU 20260520`, and bank descriptions that include changing terminal or store numbers. A rule like `TIM HORTONS` can also match `TIM HORTONS 1218` or `TIM 1218 HORTONS`.
+
+If you save a transaction without saving it as a merchant rule, the app treats that as a one-time manual decision. Future merchant-rule refreshes skip that row, so it does not keep returning to the review queue just because you chose not to create a reusable rule.
 
 After changing transaction-type logic, reclassify existing DuckDB rows:
 

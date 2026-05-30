@@ -7,7 +7,7 @@ from typing import Iterable
 
 import pandas as pd
 import yaml
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 
 from paths import MERCHANT_RULES_PATH
 
@@ -22,6 +22,7 @@ class MerchantRule:
 
 
 DEFAULT_UNCATEGORIZED = "Uncategorized"
+MIN_CONTAINS_KEY_LENGTH = 3
 
 
 def normalize_merchant_text(value: object) -> str:
@@ -33,6 +34,56 @@ def normalize_merchant_text(value: object) -> str:
 def comparable_text(value: object) -> str:
     text = normalize_merchant_text(value).upper()
     return re.sub(r"[^A-Z0-9 ]+", "", text)
+
+
+def compact_text(value: object) -> str:
+    text = normalize_merchant_text(value).upper()
+    return re.sub(r"[^A-Z0-9]+", "", text)
+
+
+def compact_without_long_numbers(value: object) -> str:
+    return re.sub(r"\d{4,}", "", compact_text(value))
+
+
+def strip_statement_noise(value: object) -> str:
+    text = normalize_merchant_text(value)
+    text = re.sub(r"\s*\([^)]*$", "", text).strip()
+    statement_prefixes = [
+        r"CONTACTLESS\s+INTERAC\s+PURCHASE",
+        r"INTERAC\s+PURCHASE",
+        r"POINT\s+OF\s+SALE",
+        r"POS\s+PURCHASE",
+        r"DEBIT\s+PURCHASE",
+        r"PURCHASE",
+    ]
+    for prefix in statement_prefixes:
+        text = re.sub(rf"(?i)^{prefix}\s*[-:]*\s*\d*\s*", "", text).strip()
+    return text or normalize_merchant_text(value)
+
+
+def remove_numeric_noise(value: object) -> str:
+    tokens = comparable_text(value).split()
+    return " ".join(token for token in tokens if not (token.isdigit() and len(token) >= 4))
+
+
+def merchant_match_keys(value: object) -> list[str]:
+    stripped = strip_statement_noise(value)
+    candidates = [
+        comparable_text(value),
+        comparable_text(stripped),
+        remove_numeric_noise(stripped),
+        compact_text(value),
+        compact_text(stripped),
+        compact_without_long_numbers(value),
+        compact_without_long_numbers(stripped),
+    ]
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def suggest_pattern_from_raw(value: object) -> str:
+    text = strip_statement_noise(value)
+    text = remove_numeric_noise(text)
+    return text or normalize_merchant_text(value)
 
 
 def title_from_raw(value: object) -> str:
@@ -91,12 +142,16 @@ def save_rule(
 
 
 def match_rule(merchant_raw: object, rules: Iterable[MerchantRule]) -> MerchantRule | None:
-    merchant = comparable_text(merchant_raw)
+    merchant_keys = merchant_match_keys(merchant_raw)
     for rule in rules:
-        pattern = comparable_text(rule.pattern)
-        if rule.match_type == "exact" and merchant == pattern:
+        pattern_keys = merchant_match_keys(rule.pattern)
+        if rule.match_type == "exact" and any(merchant_key == pattern_key for merchant_key in merchant_keys for pattern_key in pattern_keys):
             return rule
-        if rule.match_type == "contains" and pattern in merchant:
+        if rule.match_type == "contains" and any(
+            len(pattern_key) >= MIN_CONTAINS_KEY_LENGTH and pattern_key in merchant_key
+            for merchant_key in merchant_keys
+            for pattern_key in pattern_keys
+        ):
             return rule
         if rule.match_type == "regex" and re.search(rule.pattern, normalize_merchant_text(merchant_raw), re.I):
             return rule
@@ -135,18 +190,26 @@ def suggest_rule(merchant_raw: str, rules: list[MerchantRule] | None = None, sco
     if not rules:
         return None
 
-    choices = {rule.merchant_clean: comparable_text(rule.pattern) for rule in rules}
-    match = process.extractOne(comparable_text(merchant_raw), choices, scorer=fuzz.WRatio, score_cutoff=score_cutoff)
-    if not match:
+    query_keys = merchant_match_keys(merchant_raw)
+    best_rule = None
+    best_score = 0.0
+
+    for rule in rules:
+        rule_keys = merchant_match_keys(rule.pattern) + merchant_match_keys(rule.merchant_clean)
+        scores = [fuzz.WRatio(query_key, rule_key) for query_key in query_keys for rule_key in rule_keys]
+        score = max(scores)
+        if score > best_score:
+            best_rule = rule
+            best_score = float(score)
+
+    if best_rule is None or best_score < score_cutoff:
         return None
 
-    merchant_clean, score, _ = match
-    rule = next(rule for rule in rules if rule.merchant_clean == merchant_clean)
     return {
-        "merchant_clean": rule.merchant_clean,
-        "category": rule.category,
-        "subcategory": rule.subcategory,
-        "score": round(float(score), 1),
+        "merchant_clean": best_rule.merchant_clean,
+        "category": best_rule.category,
+        "subcategory": best_rule.subcategory,
+        "score": round(best_score, 1),
     }
 
 

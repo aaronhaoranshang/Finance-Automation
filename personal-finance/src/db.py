@@ -58,7 +58,9 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
     )
     ensure_column(con, "transactions", "transaction_type", "VARCHAR")
     ensure_column(con, "transactions", "scope", "VARCHAR DEFAULT 'personal'")
+    ensure_column(con, "transactions", "manual_override", "BOOLEAN DEFAULT FALSE")
     con.execute("UPDATE transactions SET scope = 'personal' WHERE scope IS NULL OR scope = ''")
+    con.execute("UPDATE transactions SET manual_override = FALSE WHERE manual_override IS NULL")
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS import_log (
@@ -141,6 +143,11 @@ def update_categorizations(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> 
         return 0
 
     payload = df[["transaction_id", "merchant_clean", "category", "subcategory"]].copy()
+    if "manual_override" in df.columns:
+        payload = payload[~df["manual_override"].fillna(False).astype(bool).to_numpy()]
+    if payload.empty:
+        return 0
+
     con.register("category_updates", payload)
     con.execute(
         """
@@ -151,6 +158,7 @@ def update_categorizations(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> 
             subcategory = category_updates.subcategory
         FROM category_updates
         WHERE transactions.transaction_id = category_updates.transaction_id
+          AND COALESCE(transactions.manual_override, FALSE) = FALSE
         """
     )
     con.unregister("category_updates")
@@ -165,6 +173,7 @@ def update_transaction_fields(
     scope: str,
     category: str,
     subcategory: str,
+    manual_override: bool = True,
 ) -> None:
     con.execute(
         """
@@ -174,8 +183,9 @@ def update_transaction_fields(
             transaction_type = ?,
             scope = ?,
             category = ?,
-            subcategory = ?
+            subcategory = ?,
+            manual_override = ?
         WHERE transaction_id = ?
         """,
-        [merchant_clean, transaction_type, scope, category, subcategory, transaction_id],
+        [merchant_clean, transaction_type, scope, category, subcategory, manual_override, transaction_id],
     )
