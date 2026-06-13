@@ -5,6 +5,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+from migrations import run_migrations, verify_metadata_tables
 from paths import DB_PATH, ensure_project_dirs
 
 
@@ -73,12 +74,17 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
+    run_migrations(con)
 
 
 def ensure_column(con: duckdb.DuckDBPyConnection, table_name: str, column_name: str, data_type: str) -> None:
     columns = con.execute(f"PRAGMA table_info('{table_name}')").df()["name"].tolist()
     if column_name not in columns:
         con.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {data_type}")
+
+
+def verify_schema(con: duckdb.DuckDBPyConnection) -> list[str]:
+    return verify_metadata_tables(con)
 
 
 def insert_transactions(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:

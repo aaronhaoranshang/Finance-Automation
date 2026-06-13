@@ -5,55 +5,27 @@ import plotly.express as px
 import streamlit as st
 
 from categorize import categorize_transactions, load_rules, save_rule, suggest_pattern_from_raw, suggest_rule
-from db import connect, load_import_log, load_transactions, update_categorizations, update_transaction_fields
+from db import (
+    connect,
+    load_import_log,
+    load_transactions,
+    update_categorizations,
+    update_transaction_fields,
+)
 from ingest import ingest_file, preview_file, supported_import_files, unique_destination
+from metadata import (
+    add_user_category,
+    disable_user_category,
+    get_categories,
+    get_category_master,
+    get_subcategories,
+    get_user_category_pairs,
+    transaction_type_requires_category,
+    validate_category_pair,
+)
 from normalize import classify_transaction
 from paths import ADMIN_CLASSIFICATION_RULES_PATH, ADMIN_SOURCE_RULES_PATH, TO_IMPORT_DIR, ensure_project_dirs
 
-
-DEFAULT_CATEGORIES = [
-    "Food",
-    "Groceries",
-    "Housing",
-    "Utilities",
-    "Transportation",
-    "Travel",
-    "Shopping",
-    "Health",
-    "Entertainment",
-    "Subscriptions",
-    "Fees",
-    "Income",
-    "Interest",
-    "Reimbursement",
-    "Cash Movement",
-    "Manual Review",
-    "Transfer",
-    "Debt Payment",
-    "Other",
-]
-
-DEFAULT_SUBCATEGORIES = {
-    "Food": ["Dining", "Delivery", "Coffee", "Snacks"],
-    "Groceries": ["Supermarket", "Warehouse", "Specialty"],
-    "Housing": ["Rent", "Mortgage", "Maintenance"],
-    "Utilities": ["Phone", "Internet", "Hydro", "Gas", "Water"],
-    "Transportation": ["Fuel", "Transit", "Parking", "Ride Share", "Maintenance"],
-    "Travel": ["Flight", "Hotel", "Car Rental", "Activities"],
-    "Shopping": ["Clothing", "Electronics", "Home", "Personal"],
-    "Health": ["Pharmacy", "Dental", "Medical", "Fitness"],
-    "Entertainment": ["Movies", "Events", "Games", "Streaming"],
-    "Subscriptions": ["Software", "Media", "Membership"],
-    "Fees": ["Bank Fee", "Interest", "Service Charge"],
-    "Income": ["Salary", "Rent", "Bonus"],
-    "Interest": ["Savings Interest", "GIC Interest"],
-    "Reimbursement": ["Friend Payback", "Refund"],
-    "Cash Movement": ["PayPower Reload"],
-    "Manual Review": [],
-    "Transfer": ["Internal Transfer"],
-    "Debt Payment": ["Credit Card Payment", "Loan Payment"],
-    "Other": [],
-}
 
 SPEND_TYPES = ["expense", "refund", "credit", "reimbursement"]
 IGNORED_MOVEMENT_TYPES = ["payment", "debt_payment", "transfer", "stored_value_reload"]
@@ -259,20 +231,56 @@ def import_mode_control() -> bool:
 
 
 def available_categories(df: pd.DataFrame) -> list[str]:
-    from_rules = [rule.category for rule in load_rules()]
-    from_db = df["category"].dropna().astype(str).tolist() if not df.empty and "category" in df.columns else []
-    return sorted({*DEFAULT_CATEGORIES, *from_rules, *from_db, "Custom"})
+    con = connect()
+    try:
+        categories = get_categories(con)
+    finally:
+        con.close()
+    return [*categories, "Custom"]
 
 
 def available_subcategories(category: str, df: pd.DataFrame) -> list[str]:
-    values = set(DEFAULT_SUBCATEGORIES.get(category, []))
-    for rule in load_rules():
-        if rule.category == category and rule.subcategory:
-            values.add(rule.subcategory)
-    if not df.empty and {"category", "subcategory"}.issubset(df.columns):
-        values.update(df.loc[df["category"] == category, "subcategory"].dropna().astype(str))
-    values.discard("")
-    return sorted(values)
+    con = connect()
+    try:
+        subcategories = get_subcategories(con, category)
+    finally:
+        con.close()
+    return subcategories
+
+
+def save_category_metadata(category: str, subcategory: str = "", sort_order: int = 100) -> None:
+    category = category.strip()
+    subcategory = subcategory.strip()
+    if not category or category == "Custom":
+        return
+
+    con = connect()
+    try:
+        add_user_category(con, category, subcategory, sort_order=sort_order)
+    finally:
+        con.close()
+
+
+def category_pair_valid(category: str, subcategory: str) -> bool:
+    con = connect()
+    try:
+        return validate_category_pair(con, category, subcategory)
+    finally:
+        con.close()
+
+
+def category_required_for_type(transaction_type: str) -> bool:
+    con = connect()
+    try:
+        return transaction_type_requires_category(con, transaction_type)
+    finally:
+        con.close()
+
+
+def is_uncategorized(df: pd.DataFrame) -> pd.Series:
+    return (df["category"] == "Uncategorized") | (
+        (df["category"] == "Other") & (df["subcategory"] == "Uncategorized")
+    )
 
 
 def filter_panel(df: pd.DataFrame) -> pd.DataFrame:
@@ -332,7 +340,7 @@ def metric_row(df: pd.DataFrame) -> None:
     income = float(df["income_amount"].sum())
     manual_review = float(df["manual_review_amount"].sum())
     ignored = float(df["ignored_movement"].sum())
-    uncategorized = int(((df["category"] == "Uncategorized") & df["transaction_type"].isin(SPEND_TYPES)).sum())
+    uncategorized = int((is_uncategorized(df) & df["transaction_type"].isin(SPEND_TYPES)).sum())
 
     col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
     col1.metric("Personal Net Spend", money(net_spend))
@@ -668,13 +676,13 @@ def render_uncategorized(df: pd.DataFrame) -> None:
     st.title("Merchant Rules")
     spend_df = df[df["transaction_type"].isin(SPEND_TYPES)]
     queue = (
-        spend_df[spend_df["category"] == "Uncategorized"]
+        spend_df[is_uncategorized(spend_df)]
         .groupby("merchant_raw", as_index=False)
         .agg(net_spend=("net_spend", "sum"), gross_spend=("gross_spend", "sum"), transactions=("transaction_id", "count"))
         .sort_values(["net_spend", "transactions"], ascending=False)
     )
 
-    tab1, tab2 = st.tabs(["Uncategorized Queue", "Existing Rules"])
+    tab1, tab2, tab3 = st.tabs(["Uncategorized Queue", "Existing Rules", "Categories"])
 
     with tab1:
         if queue.empty:
@@ -725,6 +733,10 @@ def render_uncategorized(df: pd.DataFrame) -> None:
                 if not final_category:
                     st.error("Category is required. Subcategory can stay blank.")
                 else:
+                    save_category_metadata(final_category, final_subcategory)
+                    if not category_pair_valid(final_category, final_subcategory):
+                        st.error("Category/subcategory is not valid. Add it in the Categories tab first.")
+                        st.stop()
                     save_rule(pattern, merchant_clean, final_category, final_subcategory, match_type=match_type)
                     refresh_categories()
                     st.success(f"Saved rule for {merchant_clean}.")
@@ -737,12 +749,67 @@ def render_uncategorized(df: pd.DataFrame) -> None:
         else:
             display_table(pd.DataFrame([rule.__dict__ for rule in rules]))
 
+    with tab3:
+        render_category_manager()
+
+
+def render_category_manager() -> None:
+    st.subheader("Category Master")
+    con = connect()
+    try:
+        category_master = get_category_master(con, include_disabled=True)
+        user_pairs = get_user_category_pairs(con)
+    finally:
+        con.close()
+
+    display_table(category_master)
+
+    with st.form("add_category"):
+        category = st.text_input("Custom Category")
+        subcategory = st.text_input("Custom Subcategory Optional")
+        sort_order = st.number_input("Sort Order", min_value=1, max_value=10_000, value=100, step=10)
+        submitted = st.form_submit_button("Add Category")
+
+    if submitted:
+        if not category.strip():
+            st.error("Category is required.")
+        else:
+            save_category_metadata(category, subcategory, sort_order=int(sort_order))
+            st.cache_data.clear()
+            st.success("Category saved.")
+            st.rerun()
+
+    st.subheader("Disable User Category")
+    if user_pairs.empty:
+        st.info("No user categories to disable.")
+        return
+
+    options = [
+        (row.category, row.subcategory)
+        for row in user_pairs.itertuples()
+    ]
+    selected = st.selectbox(
+        "User Category",
+        options,
+        format_func=lambda pair: f"{pair[0]} / {pair[1]}" if pair[1] else pair[0],
+    )
+    if st.button("Disable Selected User Category"):
+        con = connect()
+        try:
+            disable_user_category(con, selected[0], selected[1])
+        finally:
+            con.close()
+        st.cache_data.clear()
+        st.success("User category disabled.")
+        st.rerun()
+
 
 def render_review_queue(df: pd.DataFrame) -> None:
     st.title("Review Queue")
     review_df = df[
         df["transaction_type"].isin(REVIEW_TYPES)
         | df["category"].isin(["Manual Review", "Uncategorized"])
+        | is_uncategorized(df)
     ].copy()
 
     if review_df.empty:
@@ -823,9 +890,13 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
         scope = st.selectbox("Scope", scope_options, index=0, format_func=display_scope)
 
         categories = available_categories(df)
-        current_category = str(row.get("category") or "Uncategorized")
+        original_category = str(row.get("category") or "")
+        original_subcategory = str(row.get("subcategory") or "")
+        current_category = original_category or "Other"
+        stale_category = False
         if current_category not in categories:
-            categories.insert(0, current_category)
+            stale_category = bool(current_category)
+            current_category = "Other" if current_category == "Uncategorized" and "Other" in categories else categories[0]
         selected_category = st.selectbox("Category", categories, index=categories.index(current_category))
         custom_category = ""
         if selected_category == "Custom":
@@ -833,9 +904,13 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
         final_category = custom_category.strip() if selected_category == "Custom" else selected_category
 
         subcategory_options = [""] + available_subcategories(final_category, df)
-        current_subcategory = str(row.get("subcategory") or "")
+        current_subcategory = original_subcategory
+        stale_subcategory = False
+        if original_category == "Uncategorized" and final_category == "Other":
+            current_subcategory = "Uncategorized"
         if current_subcategory and current_subcategory not in subcategory_options:
-            subcategory_options.append(current_subcategory)
+            stale_subcategory = True
+            current_subcategory = ""
         selected_subcategory = st.selectbox(
             "Subcategory Optional",
             subcategory_options,
@@ -843,6 +918,12 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
         )
         custom_subcategory = st.text_input("Custom Subcategory Optional", value="")
         final_subcategory = custom_subcategory.strip() or selected_subcategory.strip()
+        if stale_category:
+            st.warning(f"Existing category '{original_category}' is not in Category Master and was not added to the dropdown.")
+        if stale_subcategory:
+            st.warning(
+                f"Existing subcategory '{original_subcategory}' is not valid for '{final_category}' and was not added to the dropdown."
+            )
 
         should_offer_rule = bool(str(row.get("merchant_raw") or "").strip())
         save_as_rule = st.checkbox(
@@ -861,11 +942,23 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
         submitted = st.form_submit_button("Save Transaction")
 
     if submitted:
-        if not final_category:
-            st.error("Category is required. Subcategory can stay blank.")
+        requires_category = category_required_for_type(transaction_type)
+        category_to_save = final_category if requires_category else ""
+        subcategory_to_save = final_subcategory if requires_category else ""
+
+        if requires_category and not category_to_save:
+            st.error("Category is required for this transaction type. Subcategory can stay blank.")
+            return
+        if requires_category and selected_category != "Custom" and not category_pair_valid(category_to_save, subcategory_to_save):
+            st.error(f"'{category_to_save} / {subcategory_to_save or '(None)'}' is not a valid category pair.")
             return
         if save_as_rule and not rule_pattern.strip():
             st.error("Rule Pattern is required when saving a merchant rule.")
+            return
+        if requires_category and selected_category == "Custom":
+            save_category_metadata(category_to_save, subcategory_to_save)
+        if requires_category and not category_pair_valid(category_to_save, subcategory_to_save):
+            st.error(f"'{category_to_save} / {subcategory_to_save or '(None)'}' is not a valid category pair.")
             return
         con = connect()
         try:
@@ -875,14 +968,14 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
                 merchant_clean.strip(),
                 transaction_type,
                 scope or "personal",
-                final_category,
-                final_subcategory,
+                category_to_save,
+                subcategory_to_save,
                 manual_override=not save_as_rule,
             )
         finally:
             con.close()
         if save_as_rule:
-            save_rule(rule_pattern, merchant_clean, final_category, final_subcategory, match_type="contains")
+            save_rule(rule_pattern, merchant_clean, category_to_save, subcategory_to_save, match_type="contains")
             refresh_categories()
             st.success("Transaction updated and similar merchants refreshed.")
         else:

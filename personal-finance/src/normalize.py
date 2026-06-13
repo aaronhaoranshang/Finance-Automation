@@ -479,23 +479,28 @@ def is_cash_account(account: str) -> bool:
 
 
 TRANSACTION_TYPE_DEFAULTS = {
-    "reimbursement": ("Reimbursement", "Friend Payback"),
-    "stored_value_reload": ("Cash Movement", "PayPower Reload"),
-    "manual_review": ("Manual Review", ""),
-    "payment": ("Debt Payment", "Credit Card Payment"),
-    "debt_payment": ("Debt Payment", "Credit Card Payment"),
-    "transfer": ("Transfer", "Internal Transfer"),
-    "income": ("Income", ""),
-    "refund": ("Reimbursement", "Refund"),
+    "reimbursement": ("", ""),
+    "stored_value_reload": ("", ""),
+    "manual_review": ("", ""),
+    "payment": ("", ""),
+    "debt_payment": ("", ""),
+    "transfer": ("", ""),
+    "income": ("", ""),
 }
 
 
 def apply_transaction_type_defaults(df: pd.DataFrame) -> pd.DataFrame:
     updated = df.copy()
     for transaction_type, (category, subcategory) in TRANSACTION_TYPE_DEFAULTS.items():
+        uncategorized_placeholder = updated["category"].eq("Other") & updated["subcategory"].eq("Uncategorized")
         mask = (
             updated["transaction_type"].eq(transaction_type)
-            & (updated["category"].isna() | updated["category"].eq("") | updated["category"].eq("Uncategorized"))
+            & (
+                updated["category"].isna()
+                | updated["category"].eq("")
+                | updated["category"].eq("Uncategorized")
+                | uncategorized_placeholder
+            )
         )
         updated.loc[mask, "category"] = category
         updated.loc[mask, "subcategory"] = subcategory

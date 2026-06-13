@@ -57,6 +57,20 @@ In development, the DuckDB file is created at `data/finance.duckdb`. In a packag
 
 Set `PERSONAL_FINANCE_HOME` if you want to override the data folder.
 
+Runtime metadata is stored in DuckDB. On first connection, the app runs SQL migrations from `migrations/` and tracks them in `schema_migrations`. The current migration set creates and seeds:
+
+- `transaction_type_master`
+- `category_master`
+- `merchant_rule`
+- `source_profile`
+- `source_detection_rule`
+- `source_column_mapping`
+- `import_batch`
+- `raw_import_row`
+- `transaction_classification_audit`
+
+Dashboard category and subcategory pickers read from `category_master`, not from historical transactions. Custom categories and subcategories saved in the dashboard are written back to DuckDB metadata.
+
 ## Build Desktop App
 
 Desktop builds use PyInstaller. Build on the target operating system: create the Windows `.exe` on Windows, and create the macOS `.app` on macOS.

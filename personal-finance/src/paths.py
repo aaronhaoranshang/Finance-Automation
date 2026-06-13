@@ -8,6 +8,7 @@ APP_NAME = "Personal Finance Automation"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BUNDLED_ROOT = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
 BUNDLED_RULES_DIR = BUNDLED_ROOT / "rules"
+BUNDLED_MIGRATIONS_DIR = BUNDLED_ROOT / "migrations"
 
 
 def is_packaged_app() -> bool:

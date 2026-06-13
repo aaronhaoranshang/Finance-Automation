@@ -12,6 +12,7 @@ project_root = Path.cwd()
 
 datas = [
     (str(project_root / "src"), "src"),
+    (str(project_root / "migrations"), "migrations"),
     (str(project_root / "rules" / "source_rules.yml"), "rules"),
     (str(project_root / "rules" / "merchant_rules.yml"), "rules"),
     (str(project_root / "rules" / "admin_classification_rules.example.yml"), "rules"),

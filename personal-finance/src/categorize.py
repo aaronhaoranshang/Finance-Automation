@@ -21,7 +21,8 @@ class MerchantRule:
     subcategory: str
 
 
-DEFAULT_UNCATEGORIZED = "Uncategorized"
+DEFAULT_UNCATEGORIZED_CATEGORY = "Other"
+DEFAULT_UNCATEGORIZED_SUBCATEGORY = "Uncategorized"
 MIN_CONTAINS_KEY_LENGTH = 3
 
 
@@ -176,8 +177,8 @@ def categorize_transactions(df: pd.DataFrame, rules: list[MerchantRule] | None =
             subcategory.append(rule.subcategory)
         else:
             merchant_clean.append(title_from_raw(merchant_raw))
-            category.append(DEFAULT_UNCATEGORIZED)
-            subcategory.append("")
+            category.append(DEFAULT_UNCATEGORIZED_CATEGORY)
+            subcategory.append(DEFAULT_UNCATEGORIZED_SUBCATEGORY)
 
     categorized["merchant_clean"] = merchant_clean
     categorized["category"] = category
