@@ -38,7 +38,7 @@ for package in metadata_packages:
         pass
 
 hiddenimports = []
-for package in ["streamlit", "plotly", "duckdb", "pdfplumber", "watchdog"]:
+for package in ["streamlit", "plotly", "duckdb", "pdfplumber", "watchdog", "rapidfuzz", "yaml", "openpyxl"]:
     hiddenimports += collect_submodules(package)
 
 a = Analysis(

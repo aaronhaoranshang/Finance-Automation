@@ -55,8 +55,8 @@ DEFAULT_SUBCATEGORIES = {
     "Other": [],
 }
 
-SPEND_TYPES = ["expense", "refund", "credit"]
-IGNORED_MOVEMENT_TYPES = ["payment", "debt_payment", "transfer", "reimbursement", "stored_value_reload"]
+SPEND_TYPES = ["expense", "refund", "credit", "reimbursement"]
+IGNORED_MOVEMENT_TYPES = ["payment", "debt_payment", "transfer", "stored_value_reload"]
 REVIEW_TYPES = ["manual_review"]
 TRANSACTION_TYPES = [
     "expense",
@@ -124,7 +124,7 @@ COLUMN_LABELS = {
     "gross_spend": "Gross Spend",
     "refunds_credits": "Refunds/Credits",
     "refund_credit_abs": "Refunds/Credits",
-    "net_spend": "Net Spend",
+    "net_spend": "Personal Net Spend",
     "income": "Income",
     "income_amount": "Income",
     "card_payments": "Card Payments",
@@ -169,7 +169,7 @@ COLUMN_LABELS = {
 DRILLDOWN_METRICS = {
     "Gross Spend": ["expense"],
     "Refunds/Credits": ["refund", "credit"],
-    "Net Spend": ["expense", "refund", "credit"],
+    "Personal Net Spend": ["expense", "refund", "credit", "reimbursement"],
     "Income": ["income"],
     "Card Payments": ["payment"],
     "Debt Payments": ["debt_payment"],
@@ -199,21 +199,21 @@ def money_frame(df: pd.DataFrame) -> pd.DataFrame:
         framed["scope"] = "personal"
     framed["scope"] = framed["scope"].fillna("personal").replace("", "personal")
     framed["gross_spend"] = framed["amount"].where(framed["transaction_type"] == "expense", 0)
-    framed["refund_credit"] = framed["amount"].where(framed["transaction_type"].isin(["refund", "credit"]), 0)
+    framed["refund_credit"] = -framed["amount"].where(framed["transaction_type"].isin(["refund", "credit"]), 0).abs()
     framed["refund_credit_abs"] = framed["refund_credit"].abs()
-    framed["net_spend"] = framed["gross_spend"] + framed["refund_credit"]
+    framed["reimbursement_amount"] = framed["amount"].where(framed["transaction_type"] == "reimbursement", 0).abs()
+    framed["reimbursement_offset"] = -framed["reimbursement_amount"]
+    framed["net_spend"] = framed["gross_spend"] + framed["refund_credit"] + framed["reimbursement_offset"]
     framed["income_amount"] = framed["amount"].where(framed["transaction_type"] == "income", 0).abs()
     framed["payment_amount"] = framed["amount"].where(framed["transaction_type"] == "payment", 0).abs()
     framed["debt_payment_amount"] = framed["amount"].where(framed["transaction_type"] == "debt_payment", 0).abs()
     framed["transfer_amount"] = framed["amount"].where(framed["transaction_type"] == "transfer", 0).abs()
-    framed["reimbursement_amount"] = framed["amount"].where(framed["transaction_type"] == "reimbursement", 0).abs()
     framed["stored_value_reload_amount"] = framed["amount"].where(framed["transaction_type"] == "stored_value_reload", 0).abs()
     framed["manual_review_amount"] = framed["amount"].where(framed["transaction_type"] == "manual_review", 0).abs()
     framed["ignored_movement"] = (
         framed["payment_amount"]
         + framed["debt_payment_amount"]
         + framed["transfer_amount"]
-        + framed["reimbursement_amount"]
         + framed["stored_value_reload_amount"]
     )
     framed["month"] = framed["transaction_date"].dt.to_period("M").astype(str)
@@ -335,7 +335,7 @@ def metric_row(df: pd.DataFrame) -> None:
     uncategorized = int(((df["category"] == "Uncategorized") & df["transaction_type"].isin(SPEND_TYPES)).sum())
 
     col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
-    col1.metric("Net Spend", money(net_spend))
+    col1.metric("Personal Net Spend", money(net_spend))
     col2.metric("Gross Spend", money(gross_spend))
     col3.metric("Refunds/Credits", money(refunds))
     col4.metric("Income", money(income))
@@ -373,7 +373,7 @@ def display_log_message(value: object) -> str:
         "debt_payments": "Debt Payments",
         "stored_value_reloads": "Prepaid Card Reloads",
         "manual_review": "Needs Review",
-        "net_spend": "Net Spend",
+        "net_spend": "Personal Net Spend",
         "file_net_total": "File Net Total",
         "payments": "Card Payments",
         "transfers": "Internal Transfers",
@@ -563,7 +563,7 @@ def render_drilldown(df: pd.DataFrame) -> None:
         total = drill_df["gross_spend"].sum()
     elif metric == "Refunds/Credits":
         total = drill_df["refund_credit_abs"].sum()
-    elif metric == "Net Spend":
+    elif metric == "Personal Net Spend":
         total = drill_df["net_spend"].sum()
     elif metric == "Income":
         total = drill_df["income_amount"].sum()
@@ -685,7 +685,7 @@ def render_uncategorized(df: pd.DataFrame) -> None:
             suggestion = suggest_rule(selected)
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("Net Spend", money(float(row["net_spend"])))
+            col1.metric("Personal Net Spend", money(float(row["net_spend"])))
             col2.metric("Gross Spend", money(float(row["gross_spend"])))
             col3.metric("Transactions", f"{int(row['transactions']):,}")
 
@@ -855,8 +855,7 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
         rule_pattern = st.text_input(
             "Rule Pattern",
             value=default_rule_pattern,
-            disabled=not save_as_rule,
-            help="Use the stable merchant name only. The matcher also checks compact variants like PHOANHVU.",
+            help="Used only when saving a merchant rule. Use the stable merchant name only; the matcher also checks compact variants like PHOANHVU.",
         )
 
         submitted = st.form_submit_button("Save Transaction")

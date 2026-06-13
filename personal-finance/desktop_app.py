@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import os
 import sys
-import threading
-import webbrowser
 from pathlib import Path
 
-from streamlit.web import bootstrap
+from streamlit.web import cli as streamlit_cli
 
 
 def bundled_path(relative_path: str) -> Path:
@@ -16,21 +14,23 @@ def bundled_path(relative_path: str) -> Path:
 
 def main() -> None:
     app_path = bundled_path("src/app.py")
-    port = int(os.environ.get("PERSONAL_FINANCE_PORT", "8501"))
-    url = f"http://localhost:{port}"
-
-    threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-    bootstrap.run(
+    backend_port = int(os.environ.get("PERSONAL_FINANCE_PORT", "8501"))
+    sys.argv = [
+        "streamlit",
+        "run",
         str(app_path),
-        False,
-        [],
-        flag_options={
-            "server.address": "localhost",
-            "server.port": port,
-            "server.headless": True,
-            "browser.gatherUsageStats": False,
-        },
-    )
+        "--global.developmentMode",
+        "false",
+        "--server.address",
+        "127.0.0.1",
+        "--server.port",
+        str(backend_port),
+        "--server.headless",
+        "false",
+        "--browser.gatherUsageStats",
+        "false",
+    ]
+    streamlit_cli.main()
 
 
 if __name__ == "__main__":

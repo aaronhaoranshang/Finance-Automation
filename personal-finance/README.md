@@ -23,7 +23,7 @@ conda activate finance
 Start the app:
 
 ```bash
-python run_app.py
+python src/finance.py dashboard --port 8502
 ```
 
 On a new computer, the app starts fresh with an empty local DuckDB database and generic rules. Open the `Imports` page, upload CSV/PDF statements, preview them, then import.
@@ -48,7 +48,7 @@ python src/finance.py dashboard --port 8502           # open the dashboard
 python src/finance.py watch --admin                   # auto-import new CSV/PDF files dropped into imports/to_import
 ```
 
-The preview includes detected account, majority transaction month, processed filename, duplicate count, gross expenses, refunds/credits, payments, reimbursements, prepaid card reloads, needs-review amount, net spend, and the file net total for quick checking.
+The preview includes detected account, majority transaction month, processed filename, duplicate count, gross expenses, refunds/credits, payments, reimbursements, prepaid card reloads, needs-review amount, personal net spend, and the file net total for quick checking. Personal net spend subtracts both refunds/credits and reimbursements/paybacks from gross expenses.
 
 In development, the DuckDB file is created at `data/finance.duckdb`. In a packaged desktop app, each computer gets its own fresh local data folder:
 
@@ -122,13 +122,13 @@ Use one mode consistently per DuckDB file. Your personal database should use `--
 Run:
 
 ```bash
-python run_app.py
+python src/finance.py dashboard --port 8502
 ```
 
 Main pages:
 
 - `Imports`: upload CSV/PDF statements, preview totals, and import into the local database.
-- `Overview`: filtered gross spend, refunds/credits, net spend, income, and excluded-from-spend movement.
+- `Overview`: filtered gross spend, refunds/credits, personal net spend, income, reimbursements/paybacks, and excluded-from-spend movement.
 - `Monthly Detail`: month-level category, subcategory, merchant, account, and transaction drilldowns.
 - `Audit`: account-month and source-file tables for checking imported totals, with CSV download.
 - `Drilldown`: choose a metric such as Excluded From Spend, Income, Internal Transfers, or Refunds/Credits and see the exact transactions behind it.

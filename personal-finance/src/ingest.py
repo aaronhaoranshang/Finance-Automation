@@ -140,7 +140,7 @@ def build_preview(
     manual_review = abs(float(normalized.loc[normalized["transaction_type"] == "manual_review", "amount"].sum()))
     refunds_and_credits = abs(float(normalized.loc[normalized["transaction_type"].isin(["refund", "credit"]), "amount"].sum()))
     gross_expenses = float(normalized.loc[normalized["transaction_type"] == "expense", "amount"].sum())
-    net_spend = gross_expenses - refunds_and_credits
+    net_spend = gross_expenses - refunds_and_credits - reimbursements
     file_net_total = float(normalized["amount"].sum())
 
     return ImportPreview(
@@ -209,10 +209,10 @@ def print_preview(preview: ImportPreview) -> None:
     print(f"  Debt payments excluded from spend: ${preview.debt_payments:,.2f}")
     print(f"  Income: ${preview.income:,.2f}")
     print(f"  Internal transfers excluded from spend: ${preview.transfers:,.2f}")
-    print(f"  Reimbursements excluded from spend: ${preview.reimbursements:,.2f}")
+    print(f"  Reimbursements/paybacks reducing net spend: ${preview.reimbursements:,.2f}")
     print(f"  Prepaid card reloads excluded from spend: ${preview.stored_value_reloads:,.2f}")
     print(f"  Needs manual review: ${preview.manual_review:,.2f}")
-    print(f"  Net spend: ${preview.net_spend:,.2f}")
+    print(f"  Personal net spend: ${preview.net_spend:,.2f}")
     print(f"  File net total: ${preview.file_net_total:,.2f}")
 
 
