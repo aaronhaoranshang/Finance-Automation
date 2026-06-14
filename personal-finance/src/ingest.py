@@ -4,6 +4,7 @@ import calendar
 from collections import Counter
 import hashlib
 import json
+import logging
 import re
 import shutil
 import uuid
@@ -27,6 +28,9 @@ from normalize import build_transaction_ids, load_classification_rules, normaliz
 from pdf_extract import read_pdf_statement
 from paths import DB_PATH, FAILED_DIR, PROCESSED_DIR, TO_IMPORT_DIR, ensure_project_dirs
 from source_metadata import detect_source_from_db
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -201,7 +205,8 @@ def count_existing_duplicates(normalized: pd.DataFrame, con: duckdb.DuckDBPyConn
         ).fetchone()[0]
         con.unregister("incoming_ids")
         return int(count)
-    except Exception:
+    except Exception as exc:
+        logger.exception("Duplicate check failed for incoming transactions: %s", exc)
         return None
     finally:
         if "con" in locals() and owns_connection:
@@ -316,6 +321,7 @@ def ingest_file(file_path: Path, admin: bool = False) -> dict[str, object]:
             "import_batch_id": import_batch_id,
         }
     except Exception as exc:
+        logger.exception("Import failed for %s", file_path.name)
         update_import_batch(con, import_batch_id, "failed", rows_seen, 0, 0, rows_seen, message=str(exc))
         if rows_seen:
             mark_pending_rows_failed(con, import_batch_id, str(exc))
@@ -507,4 +513,5 @@ def preview_paths(paths: list[Path], admin: bool = False) -> None:
         try:
             print_preview(preview_file(path, admin=admin))
         except Exception as exc:
+            logger.exception("Preview failed for %s", path.name)
             print(f"Failed preview {path.name}: {exc}")

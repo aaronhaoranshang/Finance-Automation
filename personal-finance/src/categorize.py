@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,9 @@ from rapidfuzz import fuzz
 
 from paths import MERCHANT_RULES_PATH
 from metadata import transaction_type_requires_category, validate_category_pair
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -363,7 +367,7 @@ def update_rule(con: duckdb.DuckDBPyConnection, rule_id: int, fields: dict[str, 
     if not existing:
         raise ValueError(f"Rule {rule_id} does not exist.")
     if existing[0] != "user":
-        raise ValueError("System rules are read-only. Create a user rule override instead.")
+        raise ValueError("Default rules are read-only. Create one of My Rules instead.")
 
     current_match_type = str(updates.get("match_type", existing[1] or "contains"))
     transaction_type = str(updates.get("transaction_type", existing[2] or ""))
@@ -455,7 +459,8 @@ def match_rule(
             try:
                 if re.search(rule.pattern, normalize_merchant_text(merchant_raw), re.I):
                     return rule
-            except re.error:
+            except re.error as exc:
+                logger.warning("Skipping invalid regex merchant rule %s (%s): %s", rule.rule_id, rule.pattern, exc)
                 continue
     return None
 

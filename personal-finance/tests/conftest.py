@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+import importlib
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+LOCAL_MODULES = [
+    "app",
+    "backup",
+    "categorize",
+    "db",
+    "finance",
+    "ingest",
+    "metadata",
+    "migrations",
+    "normalize",
+    "paths",
+    "pdf_extract",
+    "reclassify",
+    "source_admin",
+    "source_metadata",
+    "watcher",
+]
+
+
+@pytest.fixture()
+def app_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SimpleNamespace:
+    monkeypatch.setenv("PERSONAL_FINANCE_HOME", str(tmp_path / "app_home"))
+    if str(SRC_ROOT) not in sys.path:
+        sys.path.insert(0, str(SRC_ROOT))
+    for module_name in LOCAL_MODULES:
+        sys.modules.pop(module_name, None)
+
+    loaded = {
+        "paths": importlib.import_module("paths"),
+        "db": importlib.import_module("db"),
+        "metadata": importlib.import_module("metadata"),
+        "categorize": importlib.import_module("categorize"),
+        "normalize": importlib.import_module("normalize"),
+        "ingest": importlib.import_module("ingest"),
+        "reclassify": importlib.import_module("reclassify"),
+        "backup": importlib.import_module("backup"),
+    }
+    return SimpleNamespace(**loaded)

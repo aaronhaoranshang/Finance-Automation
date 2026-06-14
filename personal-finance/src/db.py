@@ -30,12 +30,17 @@ TRANSACTION_COLUMNS = [
 
 def connect(db_path: Path = DB_PATH) -> duckdb.DuckDBPyConnection:
     ensure_project_dirs()
+    database_existed = db_path.exists() and db_path.stat().st_size > 0
     con = duckdb.connect(str(db_path))
-    init_db(con)
+    init_db(con, db_path=db_path, backup_before_migrations=database_existed)
     return con
 
 
-def init_db(con: duckdb.DuckDBPyConnection) -> None:
+def init_db(
+    con: duckdb.DuckDBPyConnection,
+    db_path: Path | None = None,
+    backup_before_migrations: bool = True,
+) -> None:
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS transactions (
@@ -89,7 +94,7 @@ def init_db(con: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
-    run_migrations(con)
+    run_migrations(con, db_path=db_path, backup_before_migrations=backup_before_migrations)
 
 
 def ensure_column(con: duckdb.DuckDBPyConnection, table_name: str, column_name: str, data_type: str) -> None:
@@ -100,6 +105,38 @@ def ensure_column(con: duckdb.DuckDBPyConnection, table_name: str, column_name: 
 
 def verify_schema(con: duckdb.DuckDBPyConnection) -> list[str]:
     return verify_metadata_tables(con)
+
+
+def save_app_setting(con: duckdb.DuckDBPyConnection, setting_key: str, setting_value: str) -> None:
+    con.execute(
+        """
+        INSERT INTO app_setting (setting_key, setting_value)
+        VALUES (?, ?)
+        ON CONFLICT (setting_key) DO UPDATE
+        SET
+            setting_value = excluded.setting_value,
+            updated_at = now()
+        """,
+        [setting_key, setting_value],
+    )
+
+
+def load_app_settings(con: duckdb.DuckDBPyConnection) -> dict[str, str]:
+    if "app_setting" not in {row[0] for row in con.execute("SHOW TABLES").fetchall()}:
+        return {}
+    rows = con.execute("SELECT setting_key, setting_value FROM app_setting").fetchall()
+    return {str(key): str(value) for key, value in rows}
+
+
+def reset_imported_data(con: duckdb.DuckDBPyConnection) -> None:
+    for table in [
+        "transactions",
+        "import_log",
+        "import_batch",
+        "raw_import_row",
+        "transaction_classification_audit",
+    ]:
+        con.execute(f"DELETE FROM {table}")
 
 
 def insert_transactions(con: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> int:
@@ -397,7 +434,13 @@ def update_transaction_fields(
     category: str,
     subcategory: str,
     manual_override: bool = True,
+    category_manual_override: bool | None = None,
+    type_manual_override: bool | None = None,
+    merchant_manual_override: bool | None = None,
 ) -> None:
+    category_manual_override = manual_override if category_manual_override is None else category_manual_override
+    type_manual_override = manual_override if type_manual_override is None else type_manual_override
+    merchant_manual_override = manual_override if merchant_manual_override is None else merchant_manual_override
     con.execute(
         """
         UPDATE transactions
@@ -420,9 +463,9 @@ def update_transaction_fields(
             category,
             subcategory,
             manual_override,
-            manual_override,
-            manual_override,
-            manual_override,
+            category_manual_override,
+            type_manual_override,
+            merchant_manual_override,
             transaction_id,
         ],
     )

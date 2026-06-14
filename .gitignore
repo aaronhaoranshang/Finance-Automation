@@ -1,3 +1,23 @@
 .DS_Store
 .idea/
 .venv/
+
+# Local-first finance app data
+finance.db
+finance.duckdb
+*.duckdb
+*.duckdb.wal
+user_data/
+backups/
+imports/
+processed/
+failed/
+personal-finance/data/
+personal-finance/imports/
+personal-finance/backups/
+personal-finance/user_data/
+personal-finance/finance.db
+personal-finance/finance.duckdb
+my_rules*.json
+personal_rules*.json
+merchant_rules_export*.json

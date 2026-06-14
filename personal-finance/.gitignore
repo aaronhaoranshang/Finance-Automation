@@ -5,10 +5,23 @@ __pycache__/
 
 data/*.duckdb
 data/*.duckdb.wal
+data/
 data/manual_reconciliation/
+finance.db
+finance.duckdb
+*.duckdb
+*.duckdb.wal
+user_data/
+backups/
+imports/
 imports/to_import/*.csv
 imports/processed/*.csv
 imports/failed/*.csv
+processed/
+failed/
+my_rules*.json
+personal_rules*.json
+merchant_rules_export*.json
 rules/admin_classification_rules.yml
 rules/admin_source_rules.yml
 build/

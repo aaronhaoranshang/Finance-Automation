@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from backup import export_backup, restore_backup
 from categorize import (
     categorize_transactions,
     disable_rule,
     load_merchant_rules_from_db,
+    match_merchant_rule,
     save_user_merchant_rule,
     suggest_pattern_from_raw,
     suggest_rule,
@@ -15,10 +19,13 @@ from categorize import (
 )
 from db import (
     connect,
+    load_app_settings,
     load_import_batches,
     load_import_log,
     load_raw_import_rows,
     load_transactions,
+    reset_imported_data,
+    save_app_setting,
     update_categorizations,
     update_transaction_fields,
 )
@@ -35,7 +42,7 @@ from metadata import (
     validate_category_pair,
 )
 from normalize import apply_transaction_type_defaults, classify_transaction
-from paths import ADMIN_CLASSIFICATION_RULES_PATH, ADMIN_SOURCE_RULES_PATH, TO_IMPORT_DIR, ensure_project_dirs
+from paths import DB_PATH, TO_IMPORT_DIR, ensure_project_dirs
 from reclassify import reclassify_transactions
 
 
@@ -378,21 +385,6 @@ def save_sql_user_rule(
     return rule_id
 
 
-def admin_rules_available() -> bool:
-    return ADMIN_CLASSIFICATION_RULES_PATH.exists() and ADMIN_SOURCE_RULES_PATH.exists()
-
-
-def import_mode_control() -> bool:
-    if not admin_rules_available():
-        st.caption("Import mode: Generic")
-        return False
-    return st.toggle(
-        "Use private local rules",
-        value=False,
-        help="Keeps shared installs generic by default. Turn this on only for a local customized setup.",
-    )
-
-
 def available_categories(df: pd.DataFrame) -> list[str]:
     con = connect()
     try:
@@ -440,6 +432,20 @@ def category_required_for_type(transaction_type: str) -> bool:
         con.close()
 
 
+def category_master_pairs() -> set[tuple[str, str]]:
+    con = connect()
+    try:
+        category_master = get_category_master(con)
+    finally:
+        con.close()
+    if category_master.empty:
+        return set()
+    return {
+        (str(row.category), str(row.subcategory or ""))
+        for row in category_master.itertuples()
+    }
+
+
 def is_uncategorized(df: pd.DataFrame) -> pd.Series:
     category = df["category"].fillna("")
     subcategory = df["subcategory"].fillna("")
@@ -448,6 +454,42 @@ def is_uncategorized(df: pd.DataFrame) -> pd.Series:
     ) | (
         category.eq("") & df["transaction_type"].isin(category_required_types())
     )
+
+
+def review_reason(row: pd.Series, valid_pairs: set[tuple[str, str]]) -> str:
+    transaction_type = str(row.get("transaction_type") or "")
+    category = str(row.get("category") or "")
+    subcategory = str(row.get("subcategory") or "")
+    reasons = []
+    if transaction_type in REVIEW_TYPES:
+        reasons.append("Needs transaction type review")
+    if category_required_for_type(transaction_type) and not category:
+        reasons.append("Missing category")
+    if category and (category, subcategory) not in valid_pairs:
+        reasons.append("Category no longer exists")
+    if is_uncategorized(pd.DataFrame([row])).iloc[0]:
+        reasons.append("Uncategorized")
+
+    con = connect()
+    try:
+        matched_rule = match_merchant_rule(con, row.get("merchant_raw"))
+    finally:
+        con.close()
+    suggestion = suggest_sql_rule(str(row.get("merchant_raw") or ""), score_cutoff=0)
+    score = float(suggestion.get("score", 0)) if suggestion else 0.0
+    if matched_rule is None and score < 82:
+        reasons.append("No confident merchant rule")
+    return "; ".join(dict.fromkeys(reasons))
+
+
+def build_review_queue(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    valid_pairs = category_master_pairs()
+    queue = df.copy()
+    queue["review_reason"] = queue.apply(lambda row: review_reason(row, valid_pairs), axis=1)
+    queue = queue[queue["review_reason"].astype(str).str.len() > 0]
+    return queue.sort_values(["transaction_date", "amount"], ascending=[False, False])
 
 
 def filter_panel(df: pd.DataFrame) -> pd.DataFrame:
@@ -1070,9 +1112,12 @@ def render_uncategorized(df: pd.DataFrame) -> None:
                     st.rerun()
 
     with tab2:
+        show_system_rules = st.checkbox("Show default rules", value=False)
         rules = load_sql_merchant_rules(include_disabled=True)
+        if not show_system_rules and not rules.empty:
+            rules = rules[rules["owner_type"] == "user"]
         if rules.empty:
-            st.info("No merchant rules yet.")
+            st.info("No user merchant rules yet.")
         else:
             display_table(rules)
             render_user_rule_editor(rules)
@@ -1121,7 +1166,8 @@ def render_category_manager() -> None:
         options,
         format_func=lambda pair: f"{pair[0]} / {pair[1]}" if pair[1] else pair[0],
     )
-    if st.button("Disable Selected User Category"):
+    confirm_disable_category = st.checkbox("I understand this disables the selected user category")
+    if st.button("Disable Selected User Category", disabled=not confirm_disable_category):
         con = connect()
         try:
             disable_user_category(con, selected[0], selected[1])
@@ -1136,7 +1182,7 @@ def render_user_rule_editor(rules: pd.DataFrame) -> None:
     st.subheader("Edit User Rule")
     user_rules = rules[(rules["owner_type"] == "user") & (rules["enabled"].astype(bool))].copy()
     if user_rules.empty:
-        st.info("System rules are read-only. Create a user rule to override them.")
+        st.info("Default rules are read-only. Create one of My Rules to override them.")
         return
 
     selected_rule_id = st.selectbox(
@@ -1198,7 +1244,8 @@ def render_user_rule_editor(rules: pd.DataFrame) -> None:
         save_clicked = st.form_submit_button("Save User Rule")
 
     col1, col2 = st.columns(2)
-    disable_clicked = col1.button("Disable User Rule")
+    confirm_disable_rule = st.checkbox("I understand this disables the selected user rule")
+    disable_clicked = col1.button("Disable User Rule", disabled=not confirm_disable_rule)
     refresh_clicked = col2.button("Refresh Transactions From Rules")
 
     if save_clicked:
@@ -1235,7 +1282,7 @@ def render_user_rule_editor(rules: pd.DataFrame) -> None:
         finally:
             con.close()
         st.cache_data.clear()
-        st.success("User rule disabled. System rules can apply again.")
+        st.success("My Rule disabled. Default rules can apply again.")
         st.rerun()
 
     if refresh_clicked:
@@ -1251,11 +1298,7 @@ def format_rule_option(rules: pd.DataFrame, rule_id: int) -> str:
 
 def render_review_queue(df: pd.DataFrame) -> None:
     st.title("Review Queue")
-    review_df = df[
-        df["transaction_type"].isin(REVIEW_TYPES)
-        | df["category"].isin(["Manual Review", "Uncategorized"])
-        | is_uncategorized(df)
-    ].copy()
+    review_df = build_review_queue(df)
 
     if review_df.empty:
         st.success("No manual review transactions match the current filters.")
@@ -1274,11 +1317,188 @@ def render_review_queue(df: pd.DataFrame) -> None:
     st.subheader("Review Summary")
     display_table(type_summary)
 
-    st.subheader("Fix One Transaction")
-    render_transaction_editor(review_df, key_prefix="review")
+    st.subheader("Review Transaction")
+    render_classification_workflow(review_df)
 
     st.subheader("Transactions")
-    render_transaction_table(review_df)
+    display_table(
+        review_df,
+        [
+            "transaction_date",
+            "amount",
+            "account_name",
+            "merchant_raw",
+            "merchant_clean",
+            "transaction_type",
+            "category",
+            "subcategory",
+            "review_reason",
+        ],
+    )
+
+
+def render_classification_workflow(review_df: pd.DataFrame) -> None:
+    labels = {
+        row.transaction_id: (
+            f"{row.transaction_date} | {money(float(abs(row.amount)))} | "
+            f"{display_transaction_type(row.transaction_type)} | {str(row.merchant_raw)[:90]}"
+        )
+        for row in review_df.itertuples()
+    }
+    selected_id = st.selectbox(
+        "Transaction",
+        review_df["transaction_id"].tolist(),
+        format_func=lambda transaction_id: labels.get(transaction_id, transaction_id),
+    )
+    row = review_df[review_df["transaction_id"] == selected_id].iloc[0]
+    suggestion = suggest_sql_rule(str(row.get("merchant_raw") or ""), score_cutoff=0)
+
+    detail = pd.DataFrame(
+        [
+            {
+                "transaction_date": row.get("transaction_date"),
+                "amount": row.get("amount"),
+                "account_name": row.get("account_name"),
+                "merchant_raw": row.get("merchant_raw"),
+                "merchant_clean": row.get("merchant_clean"),
+                "transaction_type": row.get("transaction_type"),
+                "category": row.get("category"),
+                "subcategory": row.get("subcategory"),
+                "review_reason": row.get("review_reason"),
+            }
+        ]
+    )
+    display_table(detail)
+
+    if suggestion:
+        st.info(
+            "Suggestion: "
+            f"{suggestion.get('merchant_clean') or row.get('merchant_clean')} | "
+            f"{display_transaction_type(suggestion.get('transaction_type') or row.get('transaction_type'))} | "
+            f"{suggestion.get('category') or '(no category)'}"
+            f"{' / ' + suggestion.get('subcategory') if suggestion.get('subcategory') else ''} "
+            f"(confidence {suggestion.get('score', 0)}%)"
+        )
+    else:
+        st.info("No confident suggestion yet. Choose the right classification below.")
+
+    with st.form("classification_review_form"):
+        merchant_clean = st.text_input(
+            "Clean Merchant",
+            value=str((suggestion or {}).get("merchant_clean") or row.get("merchant_clean") or row.get("merchant_raw") or ""),
+        )
+        type_options = transaction_type_options(review_df["transaction_type"])
+        suggested_type = str((suggestion or {}).get("transaction_type") or row.get("transaction_type") or "expense")
+        if suggested_type not in type_options:
+            type_options.append(suggested_type)
+        transaction_type = st.selectbox(
+            "Transaction Type",
+            type_options,
+            index=type_options.index(suggested_type),
+            format_func=display_transaction_type,
+        )
+
+        requires_category = category_required_for_type(transaction_type)
+        categories = available_categories(review_df)
+        suggested_category = str((suggestion or {}).get("category") or row.get("category") or "Other")
+        if suggested_category not in categories:
+            suggested_category = "Other" if "Other" in categories else categories[0]
+        selected_category = st.selectbox("Category", categories, index=categories.index(suggested_category), disabled=not requires_category)
+        custom_category = ""
+        if selected_category == "Custom" and requires_category:
+            custom_category = st.text_input("Custom Category")
+        final_category = (custom_category.strip() if selected_category == "Custom" else selected_category) if requires_category else ""
+
+        subcategory_options = [""] + available_subcategories(final_category, review_df) if final_category else [""]
+        suggested_subcategory = str((suggestion or {}).get("subcategory") or row.get("subcategory") or "")
+        if suggested_subcategory not in subcategory_options:
+            suggested_subcategory = ""
+        selected_subcategory = st.selectbox(
+            "Subcategory Optional",
+            subcategory_options,
+            index=subcategory_options.index(suggested_subcategory),
+            disabled=not requires_category,
+        )
+        custom_subcategory = st.text_input("Custom Subcategory Optional", value="", disabled=not requires_category)
+        final_subcategory = (custom_subcategory.strip() or selected_subcategory.strip()) if requires_category else ""
+
+        match_type = st.selectbox(
+            "Future Match Type",
+            ["contains", "exact"],
+            help="Contains works well for merchants with dates, store numbers, or extra statement text. Exact is stricter.",
+        )
+        default_pattern = suggest_pattern_from_raw(merchant_clean or row.get("merchant_raw"))
+        rule_pattern = st.text_input("Future Match Text", value=default_pattern)
+
+        save_once = st.form_submit_button("Save For This Transaction Only")
+        apply_future = st.form_submit_button("Apply This Category To Future Similar Transactions")
+
+    if not save_once and not apply_future:
+        return
+
+    if requires_category and not final_category:
+        st.error("Category is required for this transaction type.")
+        return
+    if requires_category:
+        save_category_metadata(final_category, final_subcategory)
+        if not category_pair_valid(final_category, final_subcategory):
+            st.error(f"'{final_category} / {final_subcategory or '(None)'}' is not a valid category pair.")
+            return
+    if apply_future and not rule_pattern.strip():
+        st.error("Future Match Text is required when applying to future similar transactions.")
+        return
+
+    rule_id = None
+    if apply_future:
+        try:
+            rule_id = save_sql_user_rule(
+                rule_pattern,
+                merchant_clean,
+                transaction_type,
+                str(row.get("scope") or "personal"),
+                final_category,
+                final_subcategory,
+                match_type=match_type,
+                priority=25,
+                notes="Created from review queue.",
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+
+    con = connect()
+    try:
+        update_transaction_fields(
+            con,
+            selected_id,
+            merchant_clean.strip(),
+            transaction_type,
+            str(row.get("scope") or "personal"),
+            final_category,
+            final_subcategory,
+            manual_override=not apply_future,
+            category_manual_override=not apply_future,
+            type_manual_override=not apply_future,
+            merchant_manual_override=not apply_future,
+        )
+        if rule_id is not None:
+            preview = reclassify_transactions(con, dry_run=True, respect_manual_overrides=True)
+            st.session_state["last_review_reclass_preview"] = preview[preview["matched_rule_id"] == rule_id]
+    finally:
+        con.close()
+
+    st.cache_data.clear()
+    if apply_future:
+        preview = st.session_state.get("last_review_reclass_preview", pd.DataFrame())
+        st.success(f"Saved. Future similar transactions will use this classification. {len(preview):,} historical transaction(s) may also match.")
+        if preview is not None and not preview.empty:
+            display_table(
+                preview,
+                ["transaction_date", "merchant_raw", "old_category", "new_category", "old_subcategory", "new_subcategory", "reason"],
+            )
+    else:
+        st.success("Saved for this transaction only.")
+        st.rerun()
 
 
 def render_transactions(df: pd.DataFrame) -> None:
@@ -1375,7 +1595,7 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
             "Always apply this rule in the future",
             value=key_prefix == "review",
             disabled=not should_offer_rule,
-            help="Creates a local user merchant rule. User rules override shipped system rules.",
+            help="Creates one of My Rules on this device. My Rules override default rules.",
         )
         default_rule_pattern = suggest_pattern_from_raw(row.get("merchant_raw"))
         rule_pattern = st.text_input(
@@ -1463,8 +1683,6 @@ def render_imports(import_log: pd.DataFrame) -> None:
     st.caption("Add CSV/PDF statements, preview totals, then import into the local DuckDB file.")
     ensure_project_dirs()
 
-    use_admin = import_mode_control()
-
     uploaded_files = st.file_uploader(
         "Statement Files",
         type=["csv", "pdf"],
@@ -1502,7 +1720,7 @@ def render_imports(import_log: pd.DataFrame) -> None:
             errors = []
             for path in pending_files:
                 try:
-                    previews.append(preview_file(path, admin=use_admin).__dict__)
+                    previews.append(preview_file(path).__dict__)
                 except Exception as exc:
                     errors.append({"file": path.name, "error": str(exc)})
             if previews:
@@ -1512,7 +1730,7 @@ def render_imports(import_log: pd.DataFrame) -> None:
                 display_table(pd.DataFrame(errors))
 
         if col2.button("Import Pending Files"):
-            results = [ingest_file(path, admin=use_admin) for path in pending_files]
+            results = [ingest_file(path) for path in pending_files]
             display_table(pd.DataFrame(results))
             st.cache_data.clear()
             st.success("Import finished.")
@@ -1528,34 +1746,159 @@ def render_imports(import_log: pd.DataFrame) -> None:
 
 def render_empty_state() -> None:
     st.title("Personal Finance")
-    st.info("Start from the Imports page by uploading CSV/PDF statements. New installs use generic rules by default.")
+    st.info("Start from the Imports page by uploading CSV/PDF statements.")
+
+
+def database_exists() -> bool:
+    return DB_PATH.exists()
+
+
+def render_first_time_setup() -> None:
+    st.title("Welcome To Personal Finance")
+    st.info("Your financial data stays on this device.")
+    st.write("Create a local database, then import CSV or PDF statements from your bank. No subscription or cloud account is required.")
+
+    with st.form("first_time_setup"):
+        base_currency = st.selectbox("Base Currency", ["CAD", "USD"], index=0)
+        region = st.selectbox("Region", ["Canada", "United States"], index=0)
+        submitted = st.form_submit_button("Create Local Database")
+
+    if not submitted:
+        return
+
+    ensure_project_dirs()
+    con = connect()
+    try:
+        save_app_setting(con, "base_currency", base_currency)
+        save_app_setting(con, "region", region)
+        save_app_setting(con, "setup_completed_at", datetime.now().isoformat(timespec="seconds"))
+    finally:
+        con.close()
+    st.cache_data.clear()
+    st.success("Local database created. You can import statements now.")
+    st.session_state["first_page"] = "Imports"
+    st.rerun()
+
+
+def render_settings(transactions: pd.DataFrame) -> None:
+    st.title("Settings")
+    ensure_project_dirs()
+
+    con = connect()
+    try:
+        settings = load_app_settings(con)
+        rules = load_sql_merchant_rules(include_disabled=True)
+    finally:
+        con.close()
+
+    st.subheader("Local Database")
+    st.text_input("Database Path", value=str(DB_PATH), disabled=True)
+    st.text_input("Base Currency", value=settings.get("base_currency", "CAD"), disabled=True)
+    st.text_input("Region", value=settings.get("region", "Canada"), disabled=True)
+
+    col1, col2 = st.columns(2)
+    if col1.button("Export Backup", disabled=not DB_PATH.exists()):
+        backup_path = create_database_backup()
+        st.success(f"Backup created: {backup_path.name}")
+    uploaded_backup = col2.file_uploader("Restore Backup", type=["zip", "duckdb", "db"], accept_multiple_files=False)
+    if uploaded_backup is not None:
+        st.warning("Restoring replaces the current local database. A rollback backup will be created first.")
+        confirm_restore = st.checkbox("I understand restore replaces the current database")
+        if st.button("Restore Uploaded Backup", disabled=not confirm_restore):
+            restore_backup(bytes(uploaded_backup.getbuffer()))
+            st.cache_data.clear()
+            st.success("Backup restored.")
+            st.rerun()
+
+    if DB_PATH.exists():
+        st.download_button(
+            "Download Current Database",
+            DB_PATH.read_bytes(),
+            file_name=f"finance_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.duckdb",
+            mime="application/octet-stream",
+        )
+
+    st.subheader("Export")
+    if transactions.empty:
+        st.info("No transactions to export yet.")
+    else:
+        st.download_button(
+            "Export Transactions CSV",
+            transactions.to_csv(index=False).encode("utf-8"),
+            "transactions.csv",
+            "text/csv",
+        )
+
+    if not rules.empty:
+        st.download_button(
+            "Export My Rules",
+            rules[rules["owner_type"] == "user"].to_json(orient="records", indent=2).encode("utf-8"),
+            "my_rules.json",
+            "application/json",
+        )
+
+    st.subheader("Reset")
+    st.caption("This removes imported/sample transactions and audit rows. Default categories, source profiles, and default rules remain.")
+    confirm_reset = st.checkbox("I understand this removes imported/sample data from this local database")
+    if st.button("Reset Imported/Sample Data", disabled=not confirm_reset):
+        backup_path = create_database_backup() if DB_PATH.exists() else None
+        con = connect()
+        try:
+            reset_imported_data(con)
+        finally:
+            con.close()
+        st.cache_data.clear()
+        message = "Imported/sample data reset."
+        if backup_path:
+            message += f" Backup created: {backup_path.name}"
+        st.success(message)
+        st.rerun()
+
+
+def create_database_backup() -> Path:
+    return export_backup(DB_PATH)
+
+
+def restore_database_backup(buffer: bytes) -> None:
+    restore_backup(bytes(buffer), DB_PATH)
 
 
 def main() -> None:
     st.set_page_config(page_title="Personal Finance", layout="wide")
+    if not database_exists():
+        render_first_time_setup()
+        return
+
     transactions, import_log = load_data()
     df = money_frame(transactions)
 
+    pages = [
+        "Imports",
+        "Overview",
+        "Monthly Detail",
+        "Audit",
+        "Drilldown",
+        "Category Breakdown",
+        "Top Merchants",
+        "Recurring Payments",
+        "Review Queue",
+        "Merchant Rules",
+        "Transactions",
+        "Settings",
+    ]
+    default_page = st.session_state.pop("first_page", "Imports")
+    default_index = pages.index(default_page) if default_page in pages else 0
     page = st.sidebar.radio(
         "View",
-        [
-            "Imports",
-            "Overview",
-            "Monthly Detail",
-            "Audit",
-            "Drilldown",
-            "Category Breakdown",
-            "Top Merchants",
-            "Recurring Payments",
-            "Review Queue",
-            "Merchant Rules",
-            "Transactions",
-        ],
+        pages,
+        index=default_index,
     )
 
     if df.empty:
         if page == "Imports":
             render_imports(import_log)
+        elif page == "Settings":
+            render_settings(transactions)
         else:
             render_empty_state()
         return
@@ -1584,6 +1927,8 @@ def main() -> None:
         render_transactions(filtered)
     elif page == "Imports":
         render_imports(import_log)
+    elif page == "Settings":
+        render_settings(transactions)
 
 
 if __name__ == "__main__":

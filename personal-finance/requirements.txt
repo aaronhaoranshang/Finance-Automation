@@ -7,3 +7,4 @@ plotly
 pyyaml
 pdfplumber
 openpyxl
+pytest

@@ -1,5 +1,4 @@
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -7,7 +6,6 @@ from pathlib import Path
 APP_NAME = "Personal Finance Automation"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BUNDLED_ROOT = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
-BUNDLED_RULES_DIR = BUNDLED_ROOT / "rules"
 BUNDLED_MIGRATIONS_DIR = BUNDLED_ROOT / "migrations"
 
 
@@ -35,6 +33,8 @@ IMPORTS_DIR = APP_DATA_ROOT / "imports"
 TO_IMPORT_DIR = IMPORTS_DIR / "to_import"
 PROCESSED_DIR = IMPORTS_DIR / "processed"
 FAILED_DIR = IMPORTS_DIR / "failed"
+BACKUPS_DIR = APP_DATA_ROOT / "backups"
+USER_DATA_DIR = APP_DATA_ROOT / "user_data"
 DATA_DIR = APP_DATA_ROOT / "data"
 DB_PATH = DATA_DIR / "finance.duckdb"
 RULES_DIR = APP_DATA_ROOT / "rules"
@@ -45,16 +45,5 @@ ADMIN_SOURCE_RULES_PATH = RULES_DIR / "admin_source_rules.yml"
 
 
 def ensure_project_dirs() -> None:
-    for path in (TO_IMPORT_DIR, PROCESSED_DIR, FAILED_DIR, DATA_DIR, RULES_DIR):
+    for path in (TO_IMPORT_DIR, PROCESSED_DIR, FAILED_DIR, BACKUPS_DIR, USER_DATA_DIR, DATA_DIR, RULES_DIR):
         path.mkdir(parents=True, exist_ok=True)
-    seed_rule_file("source_rules.yml")
-    seed_rule_file("merchant_rules.yml")
-    seed_rule_file("admin_classification_rules.example.yml")
-    seed_rule_file("admin_source_rules.example.yml")
-
-
-def seed_rule_file(filename: str) -> None:
-    source = BUNDLED_RULES_DIR / filename
-    destination = RULES_DIR / filename
-    if source.exists() and not destination.exists():
-        shutil.copy2(source, destination)
