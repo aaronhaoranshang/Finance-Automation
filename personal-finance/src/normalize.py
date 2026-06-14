@@ -7,11 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pandas as pd
 import yaml
 
 from categorize import categorize_transactions, normalize_merchant_text
 from paths import ADMIN_CLASSIFICATION_RULES_PATH, ADMIN_SOURCE_RULES_PATH, SOURCE_RULES_PATH
+from source_metadata import apply_source_mapping
 
 
 def load_source_rules(path: Path = SOURCE_RULES_PATH, admin: bool = False, admin_path: Path = ADMIN_SOURCE_RULES_PATH) -> dict[str, Any]:
@@ -170,10 +172,21 @@ def read_csv_flex(path: Path) -> pd.DataFrame:
     last_error: Exception | None = None
     for kwargs in attempts:
         try:
-            return pd.read_csv(path, **kwargs)
+            frame = pd.read_csv(path, **kwargs)
+            if looks_like_headerless_accountactivity(frame):
+                return read_accountactivity_csv(path)
+            return frame
         except Exception as exc:
             last_error = exc
     raise ValueError(f"Could not read CSV {path.name}: {last_error}") from last_error
+
+
+def looks_like_headerless_accountactivity(df: pd.DataFrame) -> bool:
+    if len(df.columns) < 5:
+        return False
+    first_column = str(df.columns[0]).strip()
+    parsed_date = pd.to_datetime(pd.Series([first_column]), errors="coerce").iloc[0]
+    return not pd.isna(parsed_date)
 
 
 def read_accountactivity_csv(path: Path) -> pd.DataFrame:
@@ -228,7 +241,11 @@ def normalize_transactions(
     rule: dict[str, Any],
     source_file: str,
     classification_rules: dict[str, Any] | None = None,
+    con: duckdb.DuckDBPyConnection | None = None,
 ) -> pd.DataFrame:
+    if rule.get("_metadata_source"):
+        return normalize_transactions_from_metadata(df, source_name, rule, source_file, classification_rules, con)
+
     normalized = pd.DataFrame()
     normalized["transaction_date"] = parse_date(get_required_column(df, rule["date_column"]))
     normalized["posted_date"] = parse_date(get_first_available_column(df, optional_column_names(rule, "posted_date")))
@@ -244,7 +261,7 @@ def normalize_transactions(
     normalized["scope"] = rule.get("default_scope", "personal")
 
     normalized["transaction_id"] = build_transaction_ids(normalized)
-    normalized = categorize_transactions(normalized)
+    normalized = categorize_transactions(normalized, con=con)
     normalized = apply_transaction_type_defaults(normalized)
     return normalized[
         [
@@ -265,6 +282,95 @@ def normalize_transactions(
             "ingested_at",
         ]
     ]
+
+
+def normalize_transactions_from_metadata(
+    df: pd.DataFrame,
+    source_id: str,
+    rule: dict[str, Any],
+    source_file: str,
+    classification_rules: dict[str, Any] | None = None,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> pd.DataFrame:
+    if con is None:
+        raise ValueError("SQL source mapping requires an active DuckDB connection.")
+
+    mapped = apply_source_mapping(df, source_id, con)
+    normalized = pd.DataFrame(index=mapped.index)
+    normalized["transaction_date"] = mapped["transaction_date"]
+    normalized["posted_date"] = mapped["posted_date"] if "posted_date" in mapped.columns else mapped["transaction_date"]
+    normalized["posted_date"] = normalized["posted_date"].fillna(normalized["transaction_date"])
+    normalized["institution"] = rule.get("institution", source_id)
+    normalized["account_name"] = get_account_name_from_mapped(mapped, rule, source_file)
+    normalized["merchant_raw"] = mapped["merchant_raw"].map(normalize_merchant_text)
+    amount_multiplier = float(rule.get("amount_multiplier", 1))
+    normalized["amount"] = pd.to_numeric(mapped["amount"], errors="coerce") * amount_multiplier
+    if normalized["amount"].isna().any():
+        raise ValueError(f"{source_id}: amount mapping produced missing/invalid values.")
+    normalized["amount"] = normalized["amount"].round(2)
+    normalized["currency"] = rule.get("currency", "CAD")
+    normalized["source_file"] = source_file
+    normalized["ingested_at"] = datetime.now().replace(microsecond=0)
+    classification_rules = load_classification_rules() if classification_rules is None else classification_rules
+    normalized["transaction_type"] = normalized.apply(lambda row: classify_transaction(row, classification_rules), axis=1)
+    normalized["scope"] = rule.get("default_scope", "personal")
+    normalized["transaction_id"] = build_transaction_ids(normalized)
+    normalized = categorize_transactions(normalized, con=con)
+    normalized = apply_transaction_type_defaults(normalized)
+    return normalized[
+        [
+            "transaction_id",
+            "transaction_date",
+            "posted_date",
+            "institution",
+            "account_name",
+            "merchant_raw",
+            "merchant_clean",
+            "amount",
+            "transaction_type",
+            "scope",
+            "currency",
+            "category",
+            "subcategory",
+            "source_file",
+            "ingested_at",
+        ]
+    ]
+
+
+def get_account_name_from_mapped(mapped: pd.DataFrame, rule: dict[str, Any], source_file: str) -> pd.Series:
+    if rule.get("account_name_template"):
+        return build_account_name_from_mapped(mapped, rule, source_file)
+    if "account_name" in mapped.columns:
+        fallback = rule.get("account_name", "Unknown Account")
+        return mapped["account_name"].fillna(fallback).replace("", fallback).astype(str)
+    return pd.Series([rule.get("account_name", rule.get("institution", "Unknown Account"))] * len(mapped), index=mapped.index)
+
+
+def build_account_name_from_mapped(mapped: pd.DataFrame, rule: dict[str, Any], source_file: str) -> pd.Series:
+    template = rule["account_name_template"]
+    account_type = get_string_series(mapped, "account_type", "")
+    account_number = get_string_series(mapped, "account_number", "")
+    account_last4 = account_number.map(last4)
+    account_aliases = {str(key): str(value) for key, value in rule.get("account_aliases", {}).items()}
+    filename_stem = Path(source_file).stem
+
+    values = []
+    for index in mapped.index:
+        alias = account_aliases.get(
+            str(account_last4.loc[index]),
+            fallback_account_alias(account_type.loc[index], account_last4.loc[index]),
+        )
+        values.append(
+            template.format(
+                account_type=account_type.loc[index],
+                account_number=account_number.loc[index],
+                account_last4=account_last4.loc[index],
+                account_alias=alias,
+                filename_stem=filename_stem,
+            ).strip()
+        )
+    return pd.Series(values, index=mapped.index)
 
 
 def get_required_column(df: pd.DataFrame, column_name: str) -> pd.Series:
@@ -478,19 +584,26 @@ def is_cash_account(account: str) -> bool:
     )
 
 
+CATEGORYLESS_TRANSACTION_TYPES = {
+    "stored_value_reload",
+    "manual_review",
+    "payment",
+    "debt_payment",
+    "transfer",
+    "income",
+    "zero",
+}
+
 TRANSACTION_TYPE_DEFAULTS = {
     "reimbursement": ("", ""),
-    "stored_value_reload": ("", ""),
-    "manual_review": ("", ""),
-    "payment": ("", ""),
-    "debt_payment": ("", ""),
-    "transfer": ("", ""),
-    "income": ("", ""),
 }
 
 
 def apply_transaction_type_defaults(df: pd.DataFrame) -> pd.DataFrame:
     updated = df.copy()
+    categoryless_mask = updated["transaction_type"].isin(CATEGORYLESS_TRANSACTION_TYPES)
+    updated.loc[categoryless_mask, "category"] = ""
+    updated.loc[categoryless_mask, "subcategory"] = ""
     for transaction_type, (category, subcategory) in TRANSACTION_TYPE_DEFAULTS.items():
         uncategorized_placeholder = updated["category"].eq("Other") & updated["subcategory"].eq("Uncategorized")
         mask = (

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import calendar
+from collections import Counter
+import hashlib
+import json
 import re
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,10 +14,19 @@ import pandas as pd
 
 import duckdb
 
-from db import connect, insert_transactions, log_import
-from normalize import detect_source, load_classification_rules, load_source_rules, normalize_transactions, read_csv_flex
+from db import (
+    connect,
+    create_import_batch,
+    insert_raw_import_rows,
+    insert_transactions_with_status,
+    log_import,
+    update_import_batch,
+    update_raw_import_row_statuses,
+)
+from normalize import build_transaction_ids, load_classification_rules, normalize_transactions, read_csv_flex
 from pdf_extract import read_pdf_statement
 from paths import DB_PATH, FAILED_DIR, PROCESSED_DIR, TO_IMPORT_DIR, ensure_project_dirs
+from source_metadata import detect_source_from_db
 
 
 @dataclass(frozen=True)
@@ -115,12 +128,15 @@ def safe_filename(filename: str) -> str:
 
 def preview_file(file_path: Path, admin: bool = False) -> ImportPreview:
     raw = read_source_file(file_path)
-    source_rules = load_source_rules(admin=admin)
-    source_name, rule = detect_source(raw, file_path, source_rules)
     classification_rules = load_classification_rules(admin=admin)
-    normalized = normalize_transactions(raw, source_name, rule, file_path.name, classification_rules)
-    existing_duplicates = count_existing_duplicates(normalized)
-    return build_preview(file_path, source_name, rule, raw, normalized, existing_duplicates)
+    con = connect()
+    try:
+        source_name, rule = detect_source_from_db(con, raw, file_path)
+        normalized = normalize_transactions(raw, source_name, rule, file_path.name, classification_rules, con=con)
+        existing_duplicates = count_existing_duplicates(normalized, con=con)
+        return build_preview(file_path, source_name, rule, raw, normalized, existing_duplicates)
+    finally:
+        con.close()
 
 
 def build_preview(
@@ -167,12 +183,13 @@ def build_preview(
     )
 
 
-def count_existing_duplicates(normalized: pd.DataFrame) -> int | None:
+def count_existing_duplicates(normalized: pd.DataFrame, con: duckdb.DuckDBPyConnection | None = None) -> int | None:
     if normalized.empty or not DB_PATH.exists():
         return 0
 
+    owns_connection = con is None
     try:
-        con = duckdb.connect(str(DB_PATH), read_only=True)
+        con = duckdb.connect(str(DB_PATH), read_only=True) if con is None else con
         payload = normalized[["transaction_id"]].copy()
         con.register("incoming_ids", payload)
         count = con.execute(
@@ -187,7 +204,7 @@ def count_existing_duplicates(normalized: pd.DataFrame) -> int | None:
     except Exception:
         return None
     finally:
-        if "con" in locals():
+        if "con" in locals() and owns_connection:
             con.close()
 
 
@@ -220,28 +237,88 @@ def ingest_file(file_path: Path, admin: bool = False) -> dict[str, object]:
     ensure_project_dirs()
     con = connect()
     rows_seen = 0
+    import_batch_id = new_import_batch_id()
+    file_hash = file_sha256(file_path)
+    create_import_batch(con, import_batch_id, file_path.name, file_hash)
     try:
         classification_rules = load_classification_rules(admin=admin)
-        source_rules = load_source_rules(admin=admin)
         raw = read_source_file(file_path)
         rows_seen = len(raw)
-        source_name, rule = detect_source(raw, file_path, source_rules)
-        normalized = normalize_transactions(raw, source_name, rule, file_path.name, classification_rules)
-        rows_inserted = insert_transactions(con, normalized)
+        save_raw_rows(con, import_batch_id, raw)
+        source_name, rule = detect_source_from_db(con, raw, file_path)
+        normalized, row_failures = normalize_with_row_audit(
+            import_batch_id,
+            raw,
+            source_name,
+            rule,
+            file_path.name,
+            classification_rules,
+            con,
+        )
+        if normalized.empty and row_failures:
+            update_raw_import_row_statuses(con, row_failures)
+            update_import_batch(
+                con,
+                import_batch_id,
+                "failed",
+                rows_seen,
+                0,
+                0,
+                len(row_failures),
+                source_id=source_name,
+                message="All rows failed normalization.",
+            )
+            log_import(con, file_path.name, "failed", rows_seen, 0, "All rows failed normalization.")
+            destination = move_file(file_path, FAILED_DIR)
+            return {
+                "file": file_path.name,
+                "status": "failed",
+                "rows_seen": rows_seen,
+                "rows_inserted": 0,
+                "duplicates": 0,
+                "destination": str(destination),
+                "import_batch_id": import_batch_id,
+                "error": "All rows failed normalization.",
+            }
+
+        inserted_ids = insert_transactions_with_status(con, normalized)
+        rows_inserted = len(inserted_ids)
+        row_updates = build_raw_row_status_updates(import_batch_id, source_name, normalized, inserted_ids)
+        row_updates.extend(row_failures)
+        update_raw_import_row_statuses(con, row_updates)
         destination_name = processed_filename(file_path, normalized, rule)
         destination = move_file(file_path, PROCESSED_DIR, destination_name)
         duplicates = len(normalized) - rows_inserted
+        rows_failed = len(row_failures)
+        status = "partially_processed" if rows_failed else "processed"
         summary = build_preview(file_path, source_name, rule, raw, normalized, duplicates)
-        log_import(con, file_path.name, "processed", rows_seen, rows_inserted, import_message(summary, destination.name))
+        message = import_message(summary, destination.name)
+        update_import_batch(
+            con,
+            import_batch_id,
+            status,
+            rows_seen,
+            rows_inserted,
+            duplicates,
+            rows_failed,
+            source_id=source_name,
+            message=message,
+        )
+        log_import(con, file_path.name, status, rows_seen, rows_inserted, message)
         return {
             "file": file_path.name,
-            "status": "processed",
+            "status": status,
             "rows_seen": rows_seen,
             "rows_inserted": rows_inserted,
             "duplicates": duplicates,
+            "rows_failed": rows_failed,
             "destination": str(destination),
+            "import_batch_id": import_batch_id,
         }
     except Exception as exc:
+        update_import_batch(con, import_batch_id, "failed", rows_seen, 0, 0, rows_seen, message=str(exc))
+        if rows_seen:
+            mark_pending_rows_failed(con, import_batch_id, str(exc))
         log_import(con, file_path.name, "failed", rows_seen, 0, str(exc))
         destination = move_file(file_path, FAILED_DIR)
         return {
@@ -250,6 +327,7 @@ def ingest_file(file_path: Path, admin: bool = False) -> dict[str, object]:
             "rows_seen": rows_seen,
             "rows_inserted": 0,
             "destination": str(destination),
+            "import_batch_id": import_batch_id,
             "error": str(exc),
         }
     finally:
@@ -274,6 +352,133 @@ def read_source_file(file_path: Path) -> pd.DataFrame:
     if file_path.suffix.lower() == ".pdf":
         return read_pdf_statement(file_path)
     return read_csv_flex(file_path)
+
+
+def normalize_with_row_audit(
+    import_batch_id: str,
+    raw: pd.DataFrame,
+    source_name: str,
+    rule: dict[str, object],
+    source_file: str,
+    classification_rules: dict[str, object],
+    con: duckdb.DuckDBPyConnection,
+) -> tuple[pd.DataFrame, list[dict[str, object]]]:
+    try:
+        normalized = normalize_transactions(raw, source_name, rule, source_file, classification_rules, con=con)
+        normalized["_raw_row_number"] = list(range(1, len(normalized) + 1))
+        return normalized, []
+    except Exception:
+        successful = []
+        failures = []
+        for offset, (_, row) in enumerate(raw.iterrows(), start=1):
+            try:
+                normalized_row = normalize_transactions(pd.DataFrame([row]), source_name, rule, source_file, classification_rules, con=con)
+                normalized_row["_raw_row_number"] = offset
+                successful.append(normalized_row)
+            except Exception as exc:
+                failures.append(
+                    raw_row_update(
+                        import_batch_id,
+                        offset,
+                        source_name,
+                        "failed",
+                        error_message=str(exc),
+                    )
+                )
+        if not successful:
+            return pd.DataFrame(), failures
+        normalized = pd.concat(successful, ignore_index=True)
+        normalized["transaction_id"] = build_transaction_ids(normalized)
+        return normalized, failures
+
+
+def build_raw_row_status_updates(
+    import_batch_id: str,
+    source_id: str,
+    normalized: pd.DataFrame,
+    inserted_ids: list[str],
+) -> list[dict[str, object]]:
+    updates = []
+    inserted_counts = Counter(inserted_ids)
+    for _, row in normalized.iterrows():
+        transaction_id = str(row["transaction_id"])
+        if inserted_counts[transaction_id] > 0:
+            status = "inserted"
+            inserted_counts[transaction_id] -= 1
+        else:
+            status = "duplicate"
+        updates.append(
+            raw_row_update(
+                import_batch_id,
+                int(row["_raw_row_number"]),
+                source_id,
+                status,
+                normalized_transaction_id=transaction_id,
+            )
+        )
+    return updates
+
+
+def raw_row_update(
+    import_batch_id: str,
+    row_number: int,
+    source_id: str | None,
+    status: str,
+    normalized_transaction_id: str = "",
+    error_message: str = "",
+) -> dict[str, object]:
+    return {
+        "import_batch_id": import_batch_id,
+        "row_number": row_number,
+        "source_id": source_id or "",
+        "normalized_transaction_id": normalized_transaction_id,
+        "status": status,
+        "error_message": error_message,
+    }
+
+
+def mark_pending_rows_failed(con: duckdb.DuckDBPyConnection, import_batch_id: str, error_message: str) -> None:
+    con.execute(
+        """
+        UPDATE raw_import_row
+        SET status = 'failed',
+            error_message = ?
+        WHERE import_batch_id = ?
+          AND COALESCE(status, '') IN ('', 'pending')
+        """,
+        [error_message, import_batch_id],
+    )
+
+
+def save_raw_rows(con: duckdb.DuckDBPyConnection, import_batch_id: str, raw: pd.DataFrame) -> None:
+    rows = []
+    for row_number, record in enumerate(raw.to_dict(orient="records"), start=1):
+        raw_data = json.dumps(record, default=str, sort_keys=True)
+        rows.append(
+            {
+                "import_batch_id": import_batch_id,
+                "row_number": row_number,
+                "source_id": "",
+                "raw_data": raw_data,
+                "row_hash": hashlib.sha256(raw_data.encode("utf-8")).hexdigest(),
+                "normalized_transaction_id": "",
+                "status": "pending",
+                "error_message": "",
+            }
+        )
+    insert_raw_import_rows(con, import_batch_id, rows)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def new_import_batch_id() -> str:
+    return uuid.uuid4().hex
 
 
 def import_message(preview: ImportPreview, destination_name: str) -> str:

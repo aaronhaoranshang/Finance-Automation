@@ -148,6 +148,48 @@ def transaction_type_requires_category(
     return bool(row[0]) if row else False
 
 
+def get_transaction_types(con: duckdb.DuckDBPyConnection, include_disabled: bool = False) -> pd.DataFrame:
+    where_clause = "" if include_disabled else "WHERE enabled"
+    return con.execute(
+        f"""
+        SELECT
+            transaction_type,
+            display_name,
+            affects_spend,
+            affects_income,
+            affects_cash_flow,
+            requires_category,
+            default_scope,
+            sort_order,
+            enabled
+        FROM transaction_type_master
+        {where_clause}
+        ORDER BY sort_order, display_name
+        """
+    ).df()
+
+
+def get_transaction_type_labels(con: duckdb.DuckDBPyConnection, include_disabled: bool = False) -> dict[str, str]:
+    transaction_types = get_transaction_types(con, include_disabled=include_disabled)
+    if transaction_types.empty:
+        return {}
+    return dict(zip(transaction_types["transaction_type"], transaction_types["display_name"], strict=True))
+
+
+def get_spend_transaction_types(con: duckdb.DuckDBPyConnection, include_disabled: bool = False) -> list[str]:
+    transaction_types = get_transaction_types(con, include_disabled=include_disabled)
+    if transaction_types.empty:
+        return []
+    return transaction_types.loc[transaction_types["affects_spend"].astype(bool), "transaction_type"].tolist()
+
+
+def get_income_transaction_types(con: duckdb.DuckDBPyConnection, include_disabled: bool = False) -> list[str]:
+    transaction_types = get_transaction_types(con, include_disabled=include_disabled)
+    if transaction_types.empty:
+        return []
+    return transaction_types.loc[transaction_types["affects_income"].astype(bool), "transaction_type"].tolist()
+
+
 def get_category_master(con: duckdb.DuckDBPyConnection, include_disabled: bool = False) -> pd.DataFrame:
     where_clause = "" if include_disabled else "WHERE enabled"
     return con.execute(
