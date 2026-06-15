@@ -7,6 +7,9 @@ finance.db
 finance.duckdb
 *.duckdb
 *.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
 user_data/
 backups/
 imports/
@@ -16,8 +19,17 @@ personal-finance/data/
 personal-finance/imports/
 personal-finance/backups/
 personal-finance/user_data/
+personal-finance/**/*.duckdb
+personal-finance/**/*.db
+personal-finance/**/*.sqlite
+personal-finance/**/*.sqlite3
 personal-finance/finance.db
 personal-finance/finance.duckdb
+personal-finance/rules/merchant_rules.yml
+personal-finance/rules/admin_*.yml
+personal-finance/rules/private_*.yml
 my_rules*.json
 personal_rules*.json
 merchant_rules_export*.json
+!personal-finance/imports/**/.gitkeep
+!personal-finance/rules/*.example.yml

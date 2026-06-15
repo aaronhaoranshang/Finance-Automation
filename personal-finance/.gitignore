@@ -11,6 +11,9 @@ finance.db
 finance.duckdb
 *.duckdb
 *.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
 user_data/
 backups/
 imports/
@@ -22,9 +25,14 @@ failed/
 my_rules*.json
 personal_rules*.json
 merchant_rules_export*.json
+rules/merchant_rules.yml
 rules/admin_classification_rules.yml
 rules/admin_source_rules.yml
+rules/admin_*.yml
+rules/private_*.yml
 build/
 dist/
 .pyinstaller/
 *.log
+!imports/**/.gitkeep
+!rules/*.example.yml

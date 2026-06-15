@@ -1,0 +1,39 @@
+- pattern: STARBUCKS
+  match_type: contains
+  merchant_clean: Starbucks
+  transaction_type: expense
+  scope: personal
+  category: Food
+  subcategory: Coffee
+  priority: 100
+  notes: Example coffee merchant rule.
+
+- pattern: COSTCO
+  match_type: contains
+  merchant_clean: Costco
+  transaction_type: expense
+  scope: personal
+  category: Shopping
+  subcategory: Warehouse
+  priority: 100
+  notes: Example warehouse store rule.
+
+- pattern: NETFLIX
+  match_type: contains
+  merchant_clean: Netflix
+  transaction_type: expense
+  scope: personal
+  category: Subscriptions
+  subcategory: Streaming
+  priority: 100
+  notes: Example streaming subscription rule.
+
+- pattern: SHELL
+  match_type: contains
+  merchant_clean: Shell
+  transaction_type: expense
+  scope: personal
+  category: Transportation
+  subcategory: Fuel
+  priority: 100
+  notes: Example fuel merchant rule.
