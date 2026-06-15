@@ -7,7 +7,8 @@ import streamlit as st
 
 from db import connect, load_app_settings, reset_imported_data
 from paths import DB_PATH, ensure_project_dirs
-from ui.components import create_database_backup, load_sql_merchant_rules, restore_database_backup
+from services.backup_service import create_database_backup, restore_database_backup
+from services.rule_service import load_sql_merchant_rules
 
 
 def render_settings(transactions: pd.DataFrame) -> None:

@@ -4,7 +4,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from ui.components import display_table, spend_types
+from services.dashboard_service import spend_types
+from ui.components import display_table
 
 
 def render_category_breakdown(df: pd.DataFrame) -> None:
@@ -21,4 +22,3 @@ def render_category_breakdown(df: pd.DataFrame) -> None:
     )
     st.plotly_chart(px.bar(category_totals, x="category", y="net_spend"), width="stretch")
     display_table(category_totals)
-

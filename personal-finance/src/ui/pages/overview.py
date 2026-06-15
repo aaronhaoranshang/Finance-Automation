@@ -4,7 +4,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from ui.components import display_metric, display_table, metric_row, summary_by_month
+from services.dashboard_service import summary_by_month
+from ui.components import display_metric, display_table, metric_row
 
 
 def render_overview(df: pd.DataFrame) -> None:
@@ -40,4 +41,3 @@ def render_overview(df: pd.DataFrame) -> None:
     )
     st.subheader("Account Activity")
     display_table(account_summary)
-

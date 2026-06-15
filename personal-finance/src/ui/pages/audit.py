@@ -3,9 +3,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from db import connect, load_import_batches, load_raw_import_rows
 from reclassify import reclassify_transactions
-from ui.components import display_table, summary_by_month
+from services.dashboard_service import summary_by_month
+from services.import_service import load_import_batch_table, load_raw_import_row_table
+from ui.components import display_table
 
 
 def render_reconciliation(df: pd.DataFrame) -> None:
@@ -64,11 +65,7 @@ def render_reconciliation(df: pd.DataFrame) -> None:
     st.download_button("Download Account-Month CSV", csv, "account_month_reconciliation.csv", "text/csv")
 
 def render_import_batch_audit() -> None:
-    con = connect()
-    try:
-        batches = load_import_batches(con)
-    finally:
-        con.close()
+    batches = load_import_batch_table()
 
     st.subheader("Import Batches")
     if batches.empty:
@@ -81,11 +78,7 @@ def render_import_batch_audit() -> None:
         batches["import_batch_id"].tolist(),
         format_func=lambda batch_id: format_import_batch(batches, batch_id),
     )
-    con = connect()
-    try:
-        raw_rows = load_raw_import_rows(con, selected_batch)
-    finally:
-        con.close()
+    raw_rows = load_raw_import_row_table(selected_batch)
 
     if raw_rows.empty:
         st.info("No raw rows stored for this batch.")
@@ -193,4 +186,3 @@ def render_reclassification_panel(df: pd.DataFrame) -> None:
 def format_import_batch(batches: pd.DataFrame, batch_id: str) -> str:
     row = batches[batches["import_batch_id"] == batch_id].iloc[0]
     return f"{row['imported_at']} | {row['source_file']} | {row['status']}"
-

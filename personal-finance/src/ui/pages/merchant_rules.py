@@ -3,23 +3,27 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from ui.components import (
+from services.category_service import (
     available_categories,
     available_subcategories,
     category_pair_valid,
-    category_required_for_type,
-    display_table,
-    is_uncategorized,
+    save_category_metadata,
+)
+from services.dashboard_service import spend_types
+from services.review_service import is_uncategorized
+from services.rule_service import (
     load_sql_merchant_rules,
-    money,
     refresh_categories,
+    save_sql_user_rule,
+    suggest_sql_rule,
+)
+from services.transaction_service import category_required_for_type, transaction_type_options
+from ui.components import (
+    display_table,
+    display_transaction_type,
+    money,
     render_category_manager,
     render_user_rule_editor,
-    save_category_metadata,
-    save_sql_user_rule,
-    spend_types,
-    suggest_sql_rule,
-    transaction_type_options,
 )
 
 
@@ -113,6 +117,7 @@ def render_uncategorized(df: pd.DataFrame) -> None:
                         notes="Created from Merchant Rules queue.",
                     )
                     refresh_categories()
+                    st.cache_data.clear()
                     st.success(f"Saved user rule for {merchant_clean}.")
                     st.rerun()
 
@@ -129,4 +134,3 @@ def render_uncategorized(df: pd.DataFrame) -> None:
 
     with tab3:
         render_category_manager()
-

@@ -3,22 +3,25 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from categorize import suggest_pattern_from_raw
-from db import connect, update_transaction_fields
+from db import connect
 from reclassify import reclassify_transactions
-from ui.components import (
+from services.category_service import (
     available_categories,
     available_subcategories,
-    build_review_queue,
     category_pair_valid,
+    save_category_metadata,
+)
+from services.review_service import build_review_queue
+from services.rule_service import save_sql_user_rule, suggest_rule_pattern, suggest_sql_rule
+from services.transaction_service import (
     category_required_for_type,
+    transaction_type_options,
+    update_transaction_classification,
+)
+from ui.components import (
     display_table,
     display_transaction_type,
     money,
-    save_category_metadata,
-    save_sql_user_rule,
-    suggest_sql_rule,
-    transaction_type_options,
 )
 
 
@@ -152,7 +155,7 @@ def render_classification_workflow(review_df: pd.DataFrame) -> None:
             ["contains", "exact"],
             help="Contains works well for merchants with dates, store numbers, or extra statement text. Exact is stricter.",
         )
-        default_pattern = suggest_pattern_from_raw(merchant_clean or row.get("merchant_raw"))
+        default_pattern = suggest_rule_pattern(merchant_clean or row.get("merchant_raw"))
         rule_pattern = st.text_input("Future Match Text", value=default_pattern)
 
         save_once = st.form_submit_button("Save For This Transaction Only")
@@ -191,26 +194,25 @@ def render_classification_workflow(review_df: pd.DataFrame) -> None:
             st.error(str(exc))
             return
 
-    con = connect()
-    try:
-        update_transaction_fields(
-            con,
-            selected_id,
-            merchant_clean.strip(),
-            transaction_type,
-            str(row.get("scope") or "personal"),
-            final_category,
-            final_subcategory,
-            manual_override=not apply_future,
-            category_manual_override=not apply_future,
-            type_manual_override=not apply_future,
-            merchant_manual_override=not apply_future,
-        )
-        if rule_id is not None:
+    update_transaction_classification(
+        selected_id,
+        merchant_clean.strip(),
+        transaction_type,
+        str(row.get("scope") or "personal"),
+        final_category,
+        final_subcategory,
+        manual_override=not apply_future,
+        category_manual_override=not apply_future,
+        type_manual_override=not apply_future,
+        merchant_manual_override=not apply_future,
+    )
+    if rule_id is not None:
+        con = connect()
+        try:
             preview = reclassify_transactions(con, dry_run=True, respect_manual_overrides=True)
             st.session_state["last_review_reclass_preview"] = preview[preview["matched_rule_id"] == rule_id]
-    finally:
-        con.close()
+        finally:
+            con.close()
 
     st.cache_data.clear()
     if apply_future:
@@ -224,4 +226,3 @@ def render_classification_workflow(review_df: pd.DataFrame) -> None:
     else:
         st.success("Saved for this transaction only.")
         st.rerun()
-

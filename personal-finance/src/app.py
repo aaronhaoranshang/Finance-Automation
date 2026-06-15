@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ui.components import database_exists, filter_panel, load_data, money_frame
+from services.backup_service import database_exists
+from services.dashboard_service import load_data, money_frame
+from ui.components import filter_panel
 from ui.pages.audit import render_reconciliation
 from ui.pages.category_breakdown import render_category_breakdown
 from ui.pages.drilldown import render_drilldown

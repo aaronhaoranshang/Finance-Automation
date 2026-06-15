@@ -1,330 +1,38 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 
-from backup import export_backup, restore_backup
-from categorize import (
-    categorize_transactions,
-    disable_rule,
-    load_merchant_rules_from_db,
-    match_merchant_rule,
-    save_user_merchant_rule,
-    suggest_pattern_from_raw,
-    suggest_rule,
-    update_rule,
+from services.category_service import (
+    available_categories,
+    available_subcategories,
+    category_pair_valid,
+    disable_category_metadata,
+    load_category_master,
+    load_user_category_pairs,
+    save_category_metadata,
 )
-from db import (
-    connect,
-    load_import_log,
-    load_transactions,
-    update_categorizations,
-    update_transaction_fields,
+from services.dashboard_service import spend_types
+from services.review_service import is_uncategorized
+from services.rule_service import (
+    disable_user_rule,
+    refresh_categories,
+    save_sql_user_rule,
+    suggest_rule_pattern,
+    update_user_rule,
 )
-from metadata import (
-    add_user_category,
-    disable_user_category,
-    get_categories,
-    get_category_master,
-    get_subcategories,
-    get_transaction_types,
-    get_user_category_pairs,
-    transaction_type_requires_category,
-    validate_category_pair,
+from services.transaction_service import (
+    category_required_for_type,
+    transaction_type_labels,
+    transaction_type_options,
+    update_transaction_classification,
 )
-from normalize import apply_transaction_type_defaults, classify_transaction
-from paths import DB_PATH
 from .constants import (
     COLUMN_LABELS,
-    DRILLDOWN_METRICS,
-    FALLBACK_INCOME_TYPES,
-    FALLBACK_SPEND_TYPES,
-    FALLBACK_TRANSACTION_TYPE_LABELS,
-    FALLBACK_TRANSACTION_TYPES,
-    IGNORED_MOVEMENT_TYPES,
-    REVIEW_TYPES,
     SCOPES,
     SCOPE_LABELS,
     TRANSACTION_TYPE_HELP,
 )
-
-
-def load_transaction_type_metadata() -> pd.DataFrame:
-    con = connect()
-    try:
-        return get_transaction_types(con)
-    finally:
-        con.close()
-
-def transaction_type_metadata() -> pd.DataFrame:
-    try:
-        metadata = load_transaction_type_metadata()
-    except Exception:
-        metadata = pd.DataFrame()
-    return metadata
-
-def transaction_type_options(existing_types: pd.Series | None = None) -> list[str]:
-    metadata = transaction_type_metadata()
-    metadata_types = metadata["transaction_type"].dropna().astype(str).tolist() if not metadata.empty else []
-    existing = existing_types.dropna().astype(str).tolist() if existing_types is not None else []
-    return sorted({*FALLBACK_TRANSACTION_TYPES, *metadata_types, *existing}, key=display_transaction_type)
-
-def transaction_type_labels() -> dict[str, str]:
-    metadata = transaction_type_metadata()
-    if metadata.empty:
-        return FALLBACK_TRANSACTION_TYPE_LABELS
-    labels = dict(zip(metadata["transaction_type"], metadata["display_name"], strict=True))
-    return {**FALLBACK_TRANSACTION_TYPE_LABELS, **labels}
-
-def transaction_types_with_flag(flag: str, fallback: list[str]) -> list[str]:
-    metadata = transaction_type_metadata()
-    if metadata.empty or flag not in metadata.columns:
-        return fallback
-    values = metadata.loc[metadata[flag].astype(bool), "transaction_type"].dropna().astype(str).tolist()
-    return values or fallback
-
-def spend_types() -> list[str]:
-    return transaction_types_with_flag("affects_spend", FALLBACK_SPEND_TYPES)
-
-def income_types() -> list[str]:
-    return transaction_types_with_flag("affects_income", FALLBACK_INCOME_TYPES)
-
-def category_required_types() -> list[str]:
-    return transaction_types_with_flag("requires_category", ["expense", "refund", "credit"])
-
-def drilldown_metric_types(metric: str) -> list[str]:
-    if metric == "Gross Spend":
-        return ["expense"]
-    if metric == "Refunds/Credits":
-        return ["refund", "credit"]
-    if metric == "Personal Net Spend":
-        return spend_types()
-    if metric == "Income":
-        return income_types()
-    if metric == "Card Payments":
-        return ["payment"]
-    if metric == "Debt Payments":
-        return ["debt_payment"]
-    if metric == "Internal Transfers":
-        return ["transfer"]
-    if metric == "Reimbursements":
-        return ["reimbursement"]
-    if metric == "Prepaid Card Reloads":
-        return ["stored_value_reload"]
-    if metric == "Needs Review":
-        return ["manual_review"]
-    return IGNORED_MOVEMENT_TYPES
-
-def money_frame(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-
-    framed = df.copy()
-    framed["transaction_date"] = pd.to_datetime(framed["transaction_date"], errors="coerce")
-    if "transaction_type" not in framed.columns:
-        framed["transaction_type"] = framed.apply(classify_transaction, axis=1)
-    else:
-        missing_type = framed["transaction_type"].isna() | (framed["transaction_type"] == "")
-        if missing_type.any():
-            framed.loc[missing_type, "transaction_type"] = framed.loc[missing_type].apply(classify_transaction, axis=1)
-
-    framed["amount"] = pd.to_numeric(framed["amount"], errors="coerce").fillna(0)
-    if "scope" not in framed.columns:
-        framed["scope"] = "personal"
-    framed["scope"] = framed["scope"].fillna("personal").replace("", "personal")
-    income_type_values = income_types()
-    framed["gross_spend"] = framed["amount"].where(framed["transaction_type"] == "expense", 0)
-    framed["refund_credit"] = -framed["amount"].where(framed["transaction_type"].isin(["refund", "credit"]), 0).abs()
-    framed["refund_credit_abs"] = framed["refund_credit"].abs()
-    framed["reimbursement_amount"] = framed["amount"].where(framed["transaction_type"] == "reimbursement", 0).abs()
-    framed["reimbursement_offset"] = -framed["reimbursement_amount"]
-    framed["net_spend"] = framed["gross_spend"] + framed["refund_credit"] + framed["reimbursement_offset"]
-    framed["income_amount"] = framed["amount"].where(framed["transaction_type"].isin(income_type_values), 0).abs()
-    framed["payment_amount"] = framed["amount"].where(framed["transaction_type"] == "payment", 0).abs()
-    framed["debt_payment_amount"] = framed["amount"].where(framed["transaction_type"] == "debt_payment", 0).abs()
-    framed["transfer_amount"] = framed["amount"].where(framed["transaction_type"] == "transfer", 0).abs()
-    framed["stored_value_reload_amount"] = framed["amount"].where(framed["transaction_type"] == "stored_value_reload", 0).abs()
-    framed["manual_review_amount"] = framed["amount"].where(framed["transaction_type"] == "manual_review", 0).abs()
-    framed["ignored_movement"] = (
-        framed["payment_amount"]
-        + framed["debt_payment_amount"]
-        + framed["transfer_amount"]
-        + framed["stored_value_reload_amount"]
-    )
-    framed["month"] = framed["transaction_date"].dt.to_period("M").astype(str)
-    framed["display_amount"] = framed["amount"].abs()
-    framed["category"] = framed["category"].fillna("")
-    framed["subcategory"] = framed["subcategory"].fillna("")
-    missing_required_category = (
-        framed["transaction_type"].isin(category_required_types())
-        & framed["category"].eq("")
-    )
-    framed.loc[missing_required_category, "category"] = "Uncategorized"
-    return framed
-
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    con = connect()
-    try:
-        return load_transactions(con), load_import_log(con)
-    finally:
-        con.close()
-
-def refresh_categories() -> None:
-    con = connect()
-    try:
-        transactions = load_transactions(con)
-        refreshed = categorize_transactions(transactions, con=con)
-        refreshed = apply_transaction_type_defaults(refreshed)
-        update_categorizations(con, refreshed)
-    finally:
-        con.close()
-    st.cache_data.clear()
-
-def load_sql_merchant_rules(include_disabled: bool = False) -> pd.DataFrame:
-    con = connect()
-    try:
-        rules = load_merchant_rules_from_db(con, include_disabled=include_disabled)
-    finally:
-        con.close()
-    return pd.DataFrame([rule.__dict__ for rule in rules])
-
-def suggest_sql_rule(merchant_raw: str, score_cutoff: int = 82) -> dict[str, object] | None:
-    con = connect()
-    try:
-        rules = load_merchant_rules_from_db(con)
-    finally:
-        con.close()
-    return suggest_rule(merchant_raw, rules=rules, score_cutoff=score_cutoff)
-
-def save_sql_user_rule(
-    pattern: str,
-    merchant_clean: str,
-    transaction_type: str,
-    scope: str,
-    category: str,
-    subcategory: str,
-    match_type: str = "contains",
-    priority: int = 50,
-    notes: str = "",
-) -> int:
-    con = connect()
-    try:
-        rule_id = save_user_merchant_rule(
-            con,
-            pattern=pattern,
-            match_type=match_type,
-            merchant_clean=merchant_clean,
-            transaction_type=transaction_type,
-            scope=scope,
-            category=category,
-            subcategory=subcategory,
-            priority=priority,
-            notes=notes,
-        )
-    finally:
-        con.close()
-    st.cache_data.clear()
-    return rule_id
-
-def available_categories(df: pd.DataFrame) -> list[str]:
-    con = connect()
-    try:
-        categories = get_categories(con)
-    finally:
-        con.close()
-    return [*categories, "Custom"]
-
-def available_subcategories(category: str, df: pd.DataFrame) -> list[str]:
-    con = connect()
-    try:
-        subcategories = get_subcategories(con, category)
-    finally:
-        con.close()
-    return subcategories
-
-def save_category_metadata(category: str, subcategory: str = "", sort_order: int = 100) -> None:
-    category = category.strip()
-    subcategory = subcategory.strip()
-    if not category or category == "Custom":
-        return
-
-    con = connect()
-    try:
-        add_user_category(con, category, subcategory, sort_order=sort_order)
-    finally:
-        con.close()
-
-def category_pair_valid(category: str, subcategory: str) -> bool:
-    con = connect()
-    try:
-        return validate_category_pair(con, category, subcategory)
-    finally:
-        con.close()
-
-def category_required_for_type(transaction_type: str) -> bool:
-    con = connect()
-    try:
-        return transaction_type_requires_category(con, transaction_type)
-    finally:
-        con.close()
-
-def category_master_pairs() -> set[tuple[str, str]]:
-    con = connect()
-    try:
-        category_master = get_category_master(con)
-    finally:
-        con.close()
-    if category_master.empty:
-        return set()
-    return {
-        (str(row.category), str(row.subcategory or ""))
-        for row in category_master.itertuples()
-    }
-
-def is_uncategorized(df: pd.DataFrame) -> pd.Series:
-    category = df["category"].fillna("")
-    subcategory = df["subcategory"].fillna("")
-    return category.eq("Uncategorized") | (
-        (category == "Other") & (subcategory == "Uncategorized")
-    ) | (
-        category.eq("") & df["transaction_type"].isin(category_required_types())
-    )
-
-def review_reason(row: pd.Series, valid_pairs: set[tuple[str, str]]) -> str:
-    transaction_type = str(row.get("transaction_type") or "")
-    category = str(row.get("category") or "")
-    subcategory = str(row.get("subcategory") or "")
-    reasons = []
-    if transaction_type in REVIEW_TYPES:
-        reasons.append("Needs transaction type review")
-    if category_required_for_type(transaction_type) and not category:
-        reasons.append("Missing category")
-    if category and (category, subcategory) not in valid_pairs:
-        reasons.append("Category no longer exists")
-    if is_uncategorized(pd.DataFrame([row])).iloc[0]:
-        reasons.append("Uncategorized")
-
-    con = connect()
-    try:
-        matched_rule = match_merchant_rule(con, row.get("merchant_raw"))
-    finally:
-        con.close()
-    suggestion = suggest_sql_rule(str(row.get("merchant_raw") or ""), score_cutoff=0)
-    score = float(suggestion.get("score", 0)) if suggestion else 0.0
-    if matched_rule is None and score < 82:
-        reasons.append("No confident merchant rule")
-    return "; ".join(dict.fromkeys(reasons))
-
-def build_review_queue(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    valid_pairs = category_master_pairs()
-    queue = df.copy()
-    queue["review_reason"] = queue.apply(lambda row: review_reason(row, valid_pairs), axis=1)
-    queue = queue[queue["review_reason"].astype(str).str.len() > 0]
-    return queue.sort_values(["transaction_date", "amount"], ascending=[False, False])
 
 def filter_panel(df: pd.DataFrame) -> pd.DataFrame:
     with st.sidebar:
@@ -351,28 +59,6 @@ def filter_panel(df: pd.DataFrame) -> pd.DataFrame:
     if selected_types:
         filtered = filtered[filtered["transaction_type"].isin(selected_types)]
     return filtered
-
-def summary_by_month(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame()
-    return (
-        df.groupby("month", as_index=False)
-        .agg(
-            gross_spend=("gross_spend", "sum"),
-            refunds_credits=("refund_credit_abs", "sum"),
-            net_spend=("net_spend", "sum"),
-            income=("income_amount", "sum"),
-            card_payments=("payment_amount", "sum"),
-            debt_payments=("debt_payment_amount", "sum"),
-            transfers=("transfer_amount", "sum"),
-            reimbursements=("reimbursement_amount", "sum"),
-            stored_value_reloads=("stored_value_reload_amount", "sum"),
-            manual_review=("manual_review_amount", "sum"),
-            ignored_movement=("ignored_movement", "sum"),
-            transactions=("transaction_id", "count"),
-        )
-        .sort_values("month")
-    )
 
 def metric_row(df: pd.DataFrame) -> None:
     gross_spend = float(df["gross_spend"].sum())
@@ -450,12 +136,8 @@ def display_import_preview(preview: dict[str, object]) -> dict[str, object]:
 
 def render_category_manager() -> None:
     st.subheader("Category Master")
-    con = connect()
-    try:
-        category_master = get_category_master(con, include_disabled=True)
-        user_pairs = get_user_category_pairs(con)
-    finally:
-        con.close()
+    category_master = load_category_master(include_disabled=True)
+    user_pairs = load_user_category_pairs()
 
     display_table(category_master)
 
@@ -490,11 +172,7 @@ def render_category_manager() -> None:
     )
     confirm_disable_category = st.checkbox("I understand this disables the selected user category")
     if st.button("Disable Selected User Category", disabled=not confirm_disable_category):
-        con = connect()
-        try:
-            disable_user_category(con, selected[0], selected[1])
-        finally:
-            con.close()
+        disable_category_metadata(selected[0], selected[1])
         st.cache_data.clear()
         st.success("User category disabled.")
         st.rerun()
@@ -571,25 +249,20 @@ def render_user_rule_editor(rules: pd.DataFrame) -> None:
 
     if save_clicked:
         try:
-            con = connect()
-            try:
-                update_rule(
-                    con,
-                    int(selected_rule_id),
-                    {
-                        "pattern": pattern,
-                        "match_type": match_type,
-                        "merchant_clean": merchant_clean,
-                        "transaction_type": transaction_type,
-                        "scope": scope,
-                        "category": selected_category,
-                        "subcategory": selected_subcategory,
-                        "priority": int(priority),
-                        "notes": notes,
-                    },
-                )
-            finally:
-                con.close()
+            update_user_rule(
+                int(selected_rule_id),
+                {
+                    "pattern": pattern,
+                    "match_type": match_type,
+                    "merchant_clean": merchant_clean,
+                    "transaction_type": transaction_type,
+                    "scope": scope,
+                    "category": selected_category,
+                    "subcategory": selected_subcategory,
+                    "priority": int(priority),
+                    "notes": notes,
+                },
+            )
             st.cache_data.clear()
             st.success("User rule updated.")
             st.rerun()
@@ -597,17 +270,14 @@ def render_user_rule_editor(rules: pd.DataFrame) -> None:
             st.error(str(exc))
 
     if disable_clicked:
-        con = connect()
-        try:
-            disable_rule(con, int(selected_rule_id))
-        finally:
-            con.close()
+        disable_user_rule(int(selected_rule_id))
         st.cache_data.clear()
         st.success("My Rule disabled. Default rules can apply again.")
         st.rerun()
 
     if refresh_clicked:
         refresh_categories()
+        st.cache_data.clear()
         st.success("Transactions refreshed from SQL merchant rules.")
         st.rerun()
 
@@ -705,7 +375,7 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
             disabled=not should_offer_rule,
             help="Creates one of My Rules on this device. My Rules override default rules.",
         )
-        default_rule_pattern = suggest_pattern_from_raw(row.get("merchant_raw"))
+        default_rule_pattern = suggest_rule_pattern(row.get("merchant_raw"))
         rule_pattern = st.text_input(
             "Rule Pattern",
             value=default_rule_pattern,
@@ -733,20 +403,15 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
         if requires_category and not category_pair_valid(category_to_save, subcategory_to_save):
             st.error(f"'{category_to_save} / {subcategory_to_save or '(None)'}' is not a valid category pair.")
             return
-        con = connect()
-        try:
-            update_transaction_fields(
-                con,
-                selected_id,
-                merchant_clean.strip(),
-                transaction_type,
-                scope or "personal",
-                category_to_save,
-                subcategory_to_save,
-                manual_override=not save_as_rule,
-            )
-        finally:
-            con.close()
+        update_transaction_classification(
+            selected_id,
+            merchant_clean.strip(),
+            transaction_type,
+            scope or "personal",
+            category_to_save,
+            subcategory_to_save,
+            manual_override=not save_as_rule,
+        )
         if save_as_rule:
             try:
                 save_sql_user_rule(
@@ -763,6 +428,7 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
                 st.error(str(exc))
                 return
             refresh_categories()
+            st.cache_data.clear()
             st.success("Transaction updated and similar merchants refreshed.")
         else:
             st.cache_data.clear()
@@ -783,13 +449,3 @@ def render_transaction_table(df: pd.DataFrame) -> None:
         "source_file",
     ]
     display_table(df.sort_values("transaction_date", ascending=False), columns)
-
-def create_database_backup() -> Path:
-    return export_backup(DB_PATH)
-
-def restore_database_backup(buffer: bytes) -> None:
-    restore_backup(bytes(buffer), DB_PATH)
-
-def database_exists() -> bool:
-    return DB_PATH.exists()
-

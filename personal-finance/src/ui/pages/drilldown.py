@@ -3,7 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from ui.components import display_table, drilldown_metric_types, money, render_transaction_table
+from services.dashboard_service import drilldown_metric_types
+from ui.components import display_table, money, render_transaction_table
 from ui.constants import DRILLDOWN_METRICS
 
 
@@ -77,4 +78,3 @@ def render_drilldown(df: pd.DataFrame) -> None:
 
     csv = drill_df.to_csv(index=False).encode("utf-8")
     st.download_button("Download Drilldown CSV", csv, f"{metric.lower().replace(' ', '_')}_drilldown.csv", "text/csv")
-

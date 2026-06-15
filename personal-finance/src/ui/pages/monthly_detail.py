@@ -4,7 +4,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from ui.components import display_table, metric_row, render_transaction_table, spend_types
+from services.dashboard_service import spend_types
+from ui.components import display_table, metric_row, render_transaction_table
 
 
 def render_monthly_detail(df: pd.DataFrame) -> None:
@@ -52,4 +53,3 @@ def render_monthly_detail(df: pd.DataFrame) -> None:
 
     with tab5:
         render_transaction_table(month_df)
-

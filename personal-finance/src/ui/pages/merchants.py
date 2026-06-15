@@ -4,7 +4,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from ui.components import display_table, spend_types
+from services.dashboard_service import spend_types
+from ui.components import display_table
 
 
 def render_top_merchants(df: pd.DataFrame) -> None:
@@ -18,4 +19,3 @@ def render_top_merchants(df: pd.DataFrame) -> None:
     )
     st.plotly_chart(px.bar(merchant_totals, x="net_spend", y="merchant_clean", orientation="h"), width="stretch")
     display_table(merchant_totals)
-
