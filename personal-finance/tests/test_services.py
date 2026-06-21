@@ -104,7 +104,7 @@ def test_rule_service_loads_user_rules_before_system_rules(app_modules):
         transaction_type="expense",
         scope="personal",
         category="Food",
-        subcategory="Groceries",
+        subcategory="Dining",
         priority=1,
         notes="Service wrapper test",
     )
@@ -123,4 +123,3 @@ def test_backup_service_database_exists(app_modules):
     con = app_modules.db.connect()
     con.close()
     assert backup_service.database_exists()
-

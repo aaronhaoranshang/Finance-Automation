@@ -23,4 +23,8 @@ def test_streamlit_app_entrypoint_and_page_modules_import(app_modules):
         "ui.pages.transactions",
     ]
     for module_name in page_modules:
-        assert importlib.import_module(module_name)
+        module = importlib.import_module(module_name)
+        assert module
+
+    audit = importlib.import_module("ui.pages.audit")
+    assert callable(audit.connect)

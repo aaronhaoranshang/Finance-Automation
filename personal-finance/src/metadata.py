@@ -46,17 +46,47 @@ def get_subcategories(
 def add_user_category(
     con: duckdb.DuckDBPyConnection,
     category: str,
-    subcategory: str,
+    subcategory: str = "",
     sort_order: int = 100,
 ) -> None:
     category = category.strip()
     subcategory = subcategory.strip()
+    if subcategory and not category:
+        raise ValueError("Select an existing category before adding a subcategory.")
     if not category:
         return
+    if category == "Custom":
+        raise ValueError("Enter a real category name, not Custom.")
 
-    insert_category_pair(con, category, "", "user", sort_order)
     if subcategory:
+        category_exists = con.execute(
+            """
+            SELECT count(*)
+            FROM category_master
+            WHERE category = ?
+              AND enabled
+            """,
+            [category],
+        ).fetchone()[0]
+        if not category_exists:
+            raise ValueError("Custom subcategories can only be added under an existing category.")
+        if validate_category_pair(con, category, subcategory):
+            return
         insert_category_pair(con, category, subcategory, "user", sort_order)
+        return
+
+    category_exists = con.execute(
+        """
+        SELECT count(*)
+        FROM category_master
+        WHERE category = ?
+          AND enabled
+        """,
+        [category],
+    ).fetchone()[0]
+    if category_exists:
+        return
+    insert_category_pair(con, category, "", "user", sort_order)
 
 
 def disable_user_category(con: duckdb.DuckDBPyConnection, category: str, subcategory: str) -> None:

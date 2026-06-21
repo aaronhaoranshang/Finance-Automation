@@ -2,7 +2,7 @@ from __future__ import annotations
 
 FALLBACK_SPEND_TYPES = ["expense", "refund", "credit", "reimbursement"]
 FALLBACK_INCOME_TYPES = ["income"]
-IGNORED_MOVEMENT_TYPES = ["payment", "debt_payment", "transfer", "stored_value_reload"]
+IGNORED_MOVEMENT_TYPES = ["payment", "debt_payment", "transfer", "stored_value_reload", "ignored"]
 REVIEW_TYPES = ["manual_review"]
 FALLBACK_TRANSACTION_TYPES = [
     "expense",
@@ -15,6 +15,7 @@ FALLBACK_TRANSACTION_TYPES = [
     "reimbursement",
     "stored_value_reload",
     "manual_review",
+    "ignored",
     "zero",
 ]
 SCOPES = ["personal", "shared"]
@@ -30,6 +31,7 @@ FALLBACK_TRANSACTION_TYPE_LABELS = {
     "reimbursement": "Reimbursement",
     "stored_value_reload": "Prepaid Card Reload",
     "manual_review": "Needs Review",
+    "ignored": "Excluded",
     "zero": "Zero Amount",
 }
 
@@ -44,6 +46,7 @@ TRANSACTION_TYPE_HELP = {
     "Reimbursement": "Money paid back to you, or pass-through spending you do not want counted as your own spend.",
     "Prepaid Card Reload": "Large reload/top-up transaction, such as loading PayPower or another stored-value card. Ignored for spending.",
     "Needs Review": "Ambiguous transaction that needs a manual decision.",
+    "Excluded": "Transaction intentionally excluded from spending and income reporting.",
     "Zero Amount": "Zero-dollar row.",
 }
 
@@ -102,6 +105,7 @@ COLUMN_LABELS = {
     "manual_review": "Needs Review",
     "manual_review_amount": "Needs Review",
     "ignored_movement": "Excluded From Spend",
+    "ignored_amount": "Excluded",
     "transactions": "Transactions",
     "file_net": "File Net",
     "first_date": "First Date",

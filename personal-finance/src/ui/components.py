@@ -141,20 +141,57 @@ def render_category_manager() -> None:
 
     display_table(category_master)
 
-    with st.form("add_category"):
+    with st.form("add_custom_category"):
         category = st.text_input("Custom Category")
-        subcategory = st.text_input("Custom Subcategory Optional")
         sort_order = st.number_input("Sort Order", min_value=1, max_value=10_000, value=100, step=10)
-        submitted = st.form_submit_button("Add Category")
+        add_category_clicked = st.form_submit_button("Add Category")
 
-    if submitted:
+    if add_category_clicked:
         if not category.strip():
             st.error("Category is required.")
         else:
-            save_category_metadata(category, subcategory, sort_order=int(sort_order))
-            st.cache_data.clear()
-            st.success("Category saved.")
-            st.rerun()
+            try:
+                save_category_metadata(category, sort_order=int(sort_order))
+                st.cache_data.clear()
+                st.success("Category saved.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    enabled_categories = [category for category in available_categories() if category != "Custom"]
+    with st.form("add_custom_subcategory"):
+        parent_category = st.selectbox(
+            "Parent Category",
+            ["", *enabled_categories],
+            format_func=lambda value: "Select a category" if value == "" else value,
+        )
+        subcategory = st.text_input("Custom Subcategory")
+        subcategory_sort_order = st.number_input(
+            "Subcategory Sort Order",
+            min_value=1,
+            max_value=10_000,
+            value=100,
+            step=10,
+        )
+        add_subcategory_clicked = st.form_submit_button("Add Subcategory")
+
+    if add_subcategory_clicked:
+        if not parent_category:
+            st.error("Select an existing category before adding a subcategory.")
+        elif not subcategory.strip():
+            st.error("Subcategory is required.")
+        else:
+            try:
+                save_category_metadata(
+                    parent_category,
+                    subcategory,
+                    sort_order=int(subcategory_sort_order),
+                )
+                st.cache_data.clear()
+                st.success("Subcategory saved.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
     st.subheader("Disable User Category")
     if user_pairs.empty:
@@ -332,15 +369,28 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
         scope_options = list(dict.fromkeys([current_scope, *SCOPES]))
         scope = st.selectbox("Scope", scope_options, index=0, format_func=display_scope)
 
-        categories = available_categories(df)
         original_category = str(row.get("category") or "")
         original_subcategory = str(row.get("subcategory") or "")
-        current_category = original_category or "Other"
+        category_locked = transaction_type in {"income", "ignored"}
+        if transaction_type == "income":
+            categories = ["Income"]
+            current_category = "Income"
+        elif transaction_type == "ignored":
+            categories = ["Excluded"]
+            current_category = "Excluded"
+        else:
+            categories = available_categories(df)
+            current_category = original_category or "Other"
         stale_category = False
         if current_category not in categories:
             stale_category = bool(current_category)
             current_category = "Other" if current_category == "Uncategorized" and "Other" in categories else categories[0]
-        selected_category = st.selectbox("Category", categories, index=categories.index(current_category))
+        selected_category = st.selectbox(
+            "Category",
+            categories,
+            index=categories.index(current_category),
+            disabled=category_locked,
+        )
         custom_category = ""
         if selected_category == "Custom":
             custom_category = st.text_input("Custom Category")
@@ -358,8 +408,14 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
             "Subcategory Optional",
             subcategory_options,
             index=subcategory_options.index(current_subcategory) if current_subcategory in subcategory_options else 0,
+            disabled=transaction_type == "ignored",
         )
-        custom_subcategory = st.text_input("Custom Subcategory Optional", value="")
+        custom_subcategory = st.text_input(
+            "New Custom Subcategory Optional",
+            value="",
+            disabled=transaction_type == "ignored",
+            help="When provided, this is saved under the selected existing category.",
+        )
         final_subcategory = custom_subcategory.strip() or selected_subcategory.strip()
         if stale_category:
             st.warning(f"Existing category '{original_category}' is not in Category Master and was not added to the dropdown.")
@@ -388,19 +444,29 @@ def render_transaction_editor(df: pd.DataFrame, key_prefix: str) -> None:
         requires_category = category_required_for_type(transaction_type)
         category_to_save = final_category if requires_category else ""
         subcategory_to_save = final_subcategory if requires_category else ""
+        if transaction_type == "ignored":
+            category_to_save = "Excluded"
+            subcategory_to_save = ""
 
         if requires_category and not category_to_save:
             st.error("Category is required for this transaction type. Subcategory can stay blank.")
             return
-        if requires_category and selected_category != "Custom" and not category_pair_valid(category_to_save, subcategory_to_save):
-            st.error(f"'{category_to_save} / {subcategory_to_save or '(None)'}' is not a valid category pair.")
+        if selected_category == "Custom" and final_subcategory:
+            st.error("Save the custom category first, then add a subcategory under it.")
             return
         if save_as_rule and not rule_pattern.strip():
             st.error("Rule Pattern is required when saving a merchant rule.")
             return
-        if requires_category and selected_category == "Custom":
-            save_category_metadata(category_to_save, subcategory_to_save)
-        if requires_category and not category_pair_valid(category_to_save, subcategory_to_save):
+        if requires_category:
+            try:
+                if selected_category == "Custom":
+                    save_category_metadata(category_to_save)
+                elif custom_subcategory:
+                    save_category_metadata(category_to_save, subcategory_to_save)
+            except ValueError as exc:
+                st.error(str(exc))
+                return
+        if category_to_save and not category_pair_valid(category_to_save, subcategory_to_save):
             st.error(f"'{category_to_save} / {subcategory_to_save or '(None)'}' is not a valid category pair.")
             return
         update_transaction_classification(

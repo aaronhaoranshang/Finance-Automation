@@ -35,8 +35,12 @@ def available_subcategories(category: str, _df: pd.DataFrame | None = None) -> l
 def save_category_metadata(category: str, subcategory: str = "", sort_order: int = 100) -> None:
     category = category.strip()
     subcategory = subcategory.strip()
-    if not category or category == "Custom":
+    if subcategory and not category:
+        raise ValueError("Select an existing category before adding a subcategory.")
+    if not category:
         return
+    if category == "Custom":
+        raise ValueError("Enter a real category name, not Custom.")
 
     con = connect()
     try:
@@ -86,4 +90,3 @@ def disable_category_metadata(category: str, subcategory: str) -> None:
         disable_user_category(con, category, subcategory)
     finally:
         con.close()
-

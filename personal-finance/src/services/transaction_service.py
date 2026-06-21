@@ -4,6 +4,7 @@ import pandas as pd
 
 from db import connect, update_transaction_fields
 from metadata import get_transaction_types, transaction_type_requires_category
+from normalize import apply_transaction_type_defaults
 from ui.constants import FALLBACK_TRANSACTION_TYPE_LABELS, FALLBACK_TRANSACTION_TYPES
 
 
@@ -68,6 +69,17 @@ def update_transaction_classification(
     subcategory: str,
     **override_flags: object,
 ) -> None:
+    normalized = apply_transaction_type_defaults(
+        pd.DataFrame(
+            [
+                {
+                    "transaction_type": transaction_type,
+                    "category": category,
+                    "subcategory": subcategory,
+                }
+            ]
+        )
+    ).iloc[0]
     con = connect()
     try:
         update_transaction_fields(
@@ -76,10 +88,9 @@ def update_transaction_classification(
             merchant_clean,
             transaction_type,
             scope,
-            category,
-            subcategory,
+            str(normalized["category"]),
+            str(normalized["subcategory"]),
             **override_flags,
         )
     finally:
         con.close()
-

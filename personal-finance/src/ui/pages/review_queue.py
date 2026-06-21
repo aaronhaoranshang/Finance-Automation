@@ -127,15 +127,31 @@ def render_classification_workflow(review_df: pd.DataFrame) -> None:
         )
 
         requires_category = category_required_for_type(transaction_type)
-        categories = available_categories(review_df)
-        suggested_category = str((suggestion or {}).get("category") or row.get("category") or "Other")
-        if suggested_category not in categories:
-            suggested_category = "Other" if "Other" in categories else categories[0]
-        selected_category = st.selectbox("Category", categories, index=categories.index(suggested_category), disabled=not requires_category)
+        category_locked = transaction_type in {"income", "ignored"}
+        category_enabled = requires_category or transaction_type == "ignored"
+        if transaction_type == "income":
+            categories = ["Income"]
+            suggested_category = "Income"
+        elif transaction_type == "ignored":
+            categories = ["Excluded"]
+            suggested_category = "Excluded"
+        else:
+            categories = available_categories(review_df)
+            suggested_category = str((suggestion or {}).get("category") or row.get("category") or "Other")
+            if suggested_category not in categories:
+                suggested_category = "Other" if "Other" in categories else categories[0]
+        selected_category = st.selectbox(
+            "Category",
+            categories,
+            index=categories.index(suggested_category),
+            disabled=not category_enabled or category_locked,
+        )
         custom_category = ""
-        if selected_category == "Custom" and requires_category:
+        if selected_category == "Custom" and category_enabled:
             custom_category = st.text_input("Custom Category")
-        final_category = (custom_category.strip() if selected_category == "Custom" else selected_category) if requires_category else ""
+        final_category = (
+            custom_category.strip() if selected_category == "Custom" else selected_category
+        ) if category_enabled else ""
 
         subcategory_options = [""] + available_subcategories(final_category, review_df) if final_category else [""]
         suggested_subcategory = str((suggestion or {}).get("subcategory") or row.get("subcategory") or "")
@@ -145,10 +161,17 @@ def render_classification_workflow(review_df: pd.DataFrame) -> None:
             "Subcategory Optional",
             subcategory_options,
             index=subcategory_options.index(suggested_subcategory),
-            disabled=not requires_category,
+            disabled=not category_enabled or transaction_type == "ignored",
         )
-        custom_subcategory = st.text_input("Custom Subcategory Optional", value="", disabled=not requires_category)
-        final_subcategory = (custom_subcategory.strip() or selected_subcategory.strip()) if requires_category else ""
+        custom_subcategory = st.text_input(
+            "New Custom Subcategory Optional",
+            value="",
+            disabled=not category_enabled or transaction_type == "ignored",
+            help="When provided, this is saved under the selected existing category.",
+        )
+        final_subcategory = (
+            custom_subcategory.strip() or selected_subcategory.strip()
+        ) if category_enabled else ""
 
         match_type = st.selectbox(
             "Future Match Type",
@@ -167,8 +190,18 @@ def render_classification_workflow(review_df: pd.DataFrame) -> None:
     if requires_category and not final_category:
         st.error("Category is required for this transaction type.")
         return
-    if requires_category:
-        save_category_metadata(final_category, final_subcategory)
+    if selected_category == "Custom" and final_subcategory:
+        st.error("Save the custom category first, then add a subcategory under it.")
+        return
+    if category_enabled:
+        try:
+            if selected_category == "Custom":
+                save_category_metadata(final_category)
+            elif custom_subcategory:
+                save_category_metadata(final_category, final_subcategory)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
         if not category_pair_valid(final_category, final_subcategory):
             st.error(f"'{final_category} / {final_subcategory or '(None)'}' is not a valid category pair.")
             return

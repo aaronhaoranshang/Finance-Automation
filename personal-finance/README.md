@@ -60,10 +60,11 @@ The app creates:
 
 ## Data Model
 
-The app keeps transaction type separate from category/subcategory.
+The app keeps transaction type behavior separate from reporting categories.
 
 - `transaction_type` describes money movement nature, such as `expense`, `income`, `payment`, `transfer`, or `reimbursement`.
-- `category` and `subcategory` describe spending purpose, such as `Food / Coffee` or `Travel / Flights`.
+- `category` and `subcategory` describe reporting purpose, such as `Food / Coffee` or `Income / Salary`.
+- Spending and income totals are controlled by transaction type metadata, not by category names.
 
 Category dropdowns read from SQL metadata in `category_master`; they are not inferred from old transactions.
 

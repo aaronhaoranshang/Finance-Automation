@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from db import connect
 from reclassify import reclassify_transactions
 from services.dashboard_service import summary_by_month
 from services.import_service import load_import_batch_table, load_raw_import_row_table
@@ -64,6 +65,7 @@ def render_reconciliation(df: pd.DataFrame) -> None:
     csv = by_account_month.to_csv(index=False).encode("utf-8")
     st.download_button("Download Account-Month CSV", csv, "account_month_reconciliation.csv", "text/csv")
 
+
 def render_import_batch_audit() -> None:
     batches = load_import_batch_table()
 
@@ -108,6 +110,7 @@ def render_import_batch_audit() -> None:
             "row_hash",
         ],
     )
+
 
 def render_reclassification_panel(df: pd.DataFrame) -> None:
     st.subheader("Reclassification")
@@ -182,6 +185,7 @@ def render_reclassification_panel(df: pd.DataFrame) -> None:
         st.session_state.pop(preview_key, None)
         st.success(f"Applied {len(applied):,} reclassification change(s).")
         st.rerun()
+
 
 def format_import_batch(batches: pd.DataFrame, batch_id: str) -> str:
     row = batches[batches["import_batch_id"] == batch_id].iloc[0]

@@ -78,11 +78,13 @@ def money_frame(df: pd.DataFrame) -> pd.DataFrame:
     framed["transfer_amount"] = framed["amount"].where(framed["transaction_type"] == "transfer", 0).abs()
     framed["stored_value_reload_amount"] = framed["amount"].where(framed["transaction_type"] == "stored_value_reload", 0).abs()
     framed["manual_review_amount"] = framed["amount"].where(framed["transaction_type"] == "manual_review", 0).abs()
+    framed["ignored_amount"] = framed["amount"].where(framed["transaction_type"] == "ignored", 0).abs()
     framed["ignored_movement"] = (
         framed["payment_amount"]
         + framed["debt_payment_amount"]
         + framed["transfer_amount"]
         + framed["stored_value_reload_amount"]
+        + framed["ignored_amount"]
     )
     framed["month"] = framed["transaction_date"].dt.to_period("M").astype(str)
     framed["display_amount"] = framed["amount"].abs()
@@ -122,4 +124,3 @@ def summary_by_month(df: pd.DataFrame) -> pd.DataFrame:
         )
         .sort_values("month")
     )
-

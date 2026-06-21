@@ -1,6 +1,6 @@
 # Data Model
 
-The app separates money movement from spending purpose.
+The app separates money movement behavior from reporting purpose.
 
 ## Core Transaction Fields
 
@@ -16,8 +16,8 @@ The app separates money movement from spending purpose.
 - `amount`: normalized amount.
 - `transaction_type`: nature of the money movement.
 - `scope`: personal/shared.
-- `category`: spending purpose.
-- `subcategory`: optional spending purpose detail.
+- `category`: reporting purpose.
+- `subcategory`: optional reporting detail.
 - `source_file`: imported filename.
 - `ingested_at`: import timestamp.
 
@@ -36,27 +36,29 @@ Examples:
 - `reimbursement`: money paid back to you.
 - `stored_value_reload`: prepaid or stored-value reload.
 - `manual_review`: ambiguous transaction.
+- `ignored`: excluded from spend and income reporting.
 
 Transaction type behavior is configured in `transaction_type_master`.
 
 ## Category And Subcategory
 
-`category` and `subcategory` describe spending purpose only.
+`category` and `subcategory` describe reporting purpose. Transaction type remains the source of truth for whether a row affects spend, income, or neither.
 
 Valid examples:
 
 - `Food / Coffee`
-- `Food / Groceries`
-- `Travel / Flights`
-- `Shopping / Household`
+- `Grocery` with no subcategory
+- `Shopping` with no subcategory
+- `Income / Salary`
+- `Income / Interest`
+- `Excluded` with transaction type `ignored`
 
 Invalid examples:
 
 - `Debt Payment / Credit Card Payment`
 - `Transfer / Internal Transfer`
-- `Income / Salary`
 
-Those are transaction types or movement labels, not spending purposes.
+Debt payments and transfers are movement labels, not reporting categories. Income categories are valid only when the transaction type is `income`; excluded rows use transaction type `ignored`.
 
 Category options come from `category_master`; they are not inferred from historical transactions.
 

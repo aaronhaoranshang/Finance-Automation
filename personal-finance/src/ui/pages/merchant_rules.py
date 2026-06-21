@@ -76,34 +76,78 @@ def render_uncategorized(df: pd.DataFrame) -> None:
                     format_func=display_transaction_type,
                 )
 
-                categories = available_categories(df)
-                suggested_category = suggestion["category"] if suggestion else "Other"
-                default_index = categories.index(suggested_category) if suggested_category in categories else categories.index("Other")
-                selected_category = st.selectbox("Category", categories, index=default_index)
+                requires_category = category_required_for_type(rule_transaction_type)
+                category_enabled = requires_category or rule_transaction_type == "ignored"
+                category_locked = rule_transaction_type in {"income", "ignored"}
+                if rule_transaction_type == "income":
+                    categories = ["Income"]
+                    suggested_category = "Income"
+                elif rule_transaction_type == "ignored":
+                    categories = ["Excluded"]
+                    suggested_category = "Excluded"
+                elif category_enabled:
+                    categories = available_categories(df)
+                    suggested_category = suggestion["category"] if suggestion else "Other"
+                    if suggested_category not in categories:
+                        suggested_category = "Other" if "Other" in categories else categories[0]
+                else:
+                    categories = [""]
+                    suggested_category = ""
+                selected_category = st.selectbox(
+                    "Category",
+                    categories,
+                    index=categories.index(suggested_category),
+                    disabled=not category_enabled or category_locked,
+                    format_func=lambda value: "(No category)" if value == "" else value,
+                )
                 custom_category = ""
-                if selected_category == "Custom":
+                if selected_category == "Custom" and category_enabled:
                     custom_category = st.text_input("Custom Category")
 
-                final_category = custom_category.strip() if selected_category == "Custom" else selected_category
-                subcategory_options = [""] + available_subcategories(final_category, df)
+                final_category = (
+                    custom_category.strip() if selected_category == "Custom" else selected_category
+                ) if category_enabled else ""
+                subcategory_options = [""] + available_subcategories(final_category, df) if final_category else [""]
                 suggested_subcategory = suggestion["subcategory"] if suggestion else ""
                 subcategory_index = subcategory_options.index(suggested_subcategory) if suggested_subcategory in subcategory_options else 0
-                selected_subcategory = st.selectbox("Subcategory Optional", subcategory_options, index=subcategory_index)
-                custom_subcategory = st.text_input("Custom Subcategory Optional", value="")
-                final_subcategory = custom_subcategory.strip() or selected_subcategory.strip()
+                selected_subcategory = st.selectbox(
+                    "Subcategory Optional",
+                    subcategory_options,
+                    index=subcategory_index,
+                    disabled=not category_enabled or rule_transaction_type == "ignored",
+                )
+                custom_subcategory = st.text_input(
+                    "New Custom Subcategory Optional",
+                    value="",
+                    disabled=not category_enabled or rule_transaction_type == "ignored",
+                    help="When provided, this is saved under the selected existing category.",
+                )
+                final_subcategory = (
+                    custom_subcategory.strip() or selected_subcategory.strip()
+                ) if category_enabled else ""
 
                 submitted = st.form_submit_button("Save Rule And Refresh")
 
             if submitted:
-                requires_category = category_required_for_type(rule_transaction_type)
                 category_to_save = final_category if requires_category else ""
                 subcategory_to_save = final_subcategory if requires_category else ""
+                if rule_transaction_type == "ignored":
+                    category_to_save = "Excluded"
+                    subcategory_to_save = ""
                 if requires_category and not category_to_save:
                     st.error("Category is required. Subcategory can stay blank.")
+                elif selected_category == "Custom" and final_subcategory:
+                    st.error("Save the custom category first, then add a subcategory under it.")
                 else:
-                    if requires_category:
-                        save_category_metadata(category_to_save, subcategory_to_save)
-                    if requires_category and not category_pair_valid(category_to_save, subcategory_to_save):
+                    try:
+                        if requires_category and selected_category == "Custom":
+                            save_category_metadata(category_to_save)
+                        elif category_enabled and custom_subcategory:
+                            save_category_metadata(category_to_save, subcategory_to_save)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                        st.stop()
+                    if category_to_save and not category_pair_valid(category_to_save, subcategory_to_save):
                         st.error("Category/subcategory is not valid. Add it in the Categories tab first.")
                         st.stop()
                     save_sql_user_rule(

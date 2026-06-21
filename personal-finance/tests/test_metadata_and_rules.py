@@ -48,8 +48,8 @@ def test_transaction_type_defaults_do_not_pollute_categories(app_modules):
     assert normalized.loc[0, "subcategory"] == ""
     assert normalized.loc[1, "category"] == ""
     assert normalized.loc[1, "subcategory"] == ""
-    assert normalized.loc[2, "category"] == ""
-    assert normalized.loc[2, "subcategory"] == ""
+    assert normalized.loc[2, "category"] == "Income"
+    assert normalized.loc[2, "subcategory"] == "Salary"
     assert normalized.loc[3, "category"] == ""
     assert normalized.loc[3, "subcategory"] == ""
     assert normalized.loc[4, "category"] == "Food"
@@ -62,7 +62,7 @@ def test_user_rule_overrides_default_rule_and_can_fall_back(app_modules):
         default_rule = app_modules.categorize.match_merchant_rule(con, "COSTCO WHOLESALE")
         assert default_rule is not None
         assert default_rule.owner_type == "system"
-        assert (default_rule.category, default_rule.subcategory) == ("Shopping", "Warehouse")
+        assert (default_rule.category, default_rule.subcategory) == ("Grocery", "")
 
         user_rule_id = app_modules.categorize.save_user_merchant_rule(
             con,
@@ -72,7 +72,7 @@ def test_user_rule_overrides_default_rule_and_can_fall_back(app_modules):
             transaction_type="expense",
             scope="personal",
             category="Food",
-            subcategory="Groceries",
+            subcategory="Dining",
             priority=1,
             notes="Test override",
         )
@@ -80,12 +80,12 @@ def test_user_rule_overrides_default_rule_and_can_fall_back(app_modules):
         assert user_rule is not None
         assert user_rule.rule_id == user_rule_id
         assert user_rule.owner_type == "user"
-        assert (user_rule.category, user_rule.subcategory) == ("Food", "Groceries")
+        assert (user_rule.category, user_rule.subcategory) == ("Food", "Dining")
 
         app_modules.categorize.disable_rule(con, user_rule_id)
         fallback_rule = app_modules.categorize.match_merchant_rule(con, "COSTCO WHOLESALE")
         assert fallback_rule is not None
         assert fallback_rule.owner_type == "system"
-        assert (fallback_rule.category, fallback_rule.subcategory) == ("Shopping", "Warehouse")
+        assert (fallback_rule.category, fallback_rule.subcategory) == ("Grocery", "")
     finally:
         con.close()

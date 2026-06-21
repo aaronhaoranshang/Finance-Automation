@@ -422,6 +422,10 @@ def validate_rule_fields(
 
     if transaction_type and transaction_type_requires_category(con, transaction_type) and not category:
         raise ValueError(f"{transaction_type} rules require a category.")
+    if transaction_type == "income" and category != "Income":
+        raise ValueError("Income rules must use the Income category.")
+    if transaction_type == "ignored" and category and category != "Excluded":
+        raise ValueError("Excluded rules must use the Excluded category.")
     if category or subcategory:
         if not validate_category_pair(con, category, subcategory):
             raise ValueError(f"Invalid category/subcategory: {category} / {subcategory or '(None)'}")
