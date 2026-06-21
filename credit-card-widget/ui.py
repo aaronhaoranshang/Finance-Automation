@@ -23,12 +23,11 @@ from PyQt6.QtWidgets import (
 )
 
 from db import (
-    CreditCardBill,
+    CreditCard,
     DatabaseError,
-    add_bill,
-    get_bills,
-    mark_bill_paid,
-    mark_bill_unpaid,
+    add_card,
+    get_cards,
+    mark_card_paid,
 )
 
 
@@ -97,23 +96,9 @@ QPushButton#paidButton {
 QPushButton#paidButton:hover {
     background: #363e4b;
 }
-QPushButton#restoreButton {
-    background: transparent;
-    color: #8f98a8;
-    min-height: 26px;
-    padding: 0 6px;
-}
-QPushButton#restoreButton:hover {
-    color: #dce2ec;
-}
-QFrame#billCard {
+QFrame#cardPanel {
     background: #222630;
     border: 1px solid #303642;
-    border-radius: 14px;
-}
-QFrame#paidCard {
-    background: #1d2027;
-    border: 1px solid #292e37;
     border-radius: 14px;
 }
 QLabel#cardName {
@@ -132,14 +117,8 @@ QLabel#daysToday {
     color: #ffcc66;
     font-weight: 700;
 }
-QLabel#daysOverdue {
+QLabel#daysPastPayBy {
     color: #ff737d;
-    font-weight: 700;
-}
-QLabel#paidText, QLabel#paidCardName {
-    color: #737c8b;
-}
-QLabel#paidCardName {
     font-weight: 700;
 }
 QScrollArea, QScrollArea > QWidget > QWidget {
@@ -163,7 +142,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 
 
 class CreditCardWidget(QMainWindow):
-    """Compact main window for adding and tracking card bills."""
+    """Compact main window for tracking recurring credit card due dates."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -174,7 +153,7 @@ class CreditCardWidget(QMainWindow):
         self.setStyleSheet(APP_STYLESHEET)
 
         self._build_ui()
-        self.refresh_bills()
+        self.refresh_cards()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -199,25 +178,34 @@ class CreditCardWidget(QMainWindow):
         self.card_name_input = QLineEdit()
         self.card_name_input.setPlaceholderText("Card name")
         self.card_name_input.setClearButtonEnabled(True)
-        self.card_name_input.returnPressed.connect(self.add_new_bill)
+        self.card_name_input.returnPressed.connect(self.add_new_card)
 
         add_row = QHBoxLayout()
         add_row.setSpacing(8)
 
+        due_date_group = QVBoxLayout()
+        due_date_group.setSpacing(5)
+
+        due_date_label = QLabel("Current statement due date")
+        due_date_label.setObjectName("sectionTitle")
+
         self.due_date_input = QDateEdit()
         self.due_date_input.setCalendarPopup(True)
         self.due_date_input.setDisplayFormat("MMM d, yyyy")
-        self.due_date_input.setDate(QDate.currentDate().addDays(7))
+        self.due_date_input.setMinimumDate(QDate.currentDate())
+        self.due_date_input.setDate(QDate.currentDate().addDays(14))
         self.due_date_input.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Fixed,
         )
+        due_date_group.addWidget(due_date_label)
+        due_date_group.addWidget(self.due_date_input)
 
         add_button = QPushButton("Add")
-        add_button.clicked.connect(self.add_new_bill)
+        add_button.clicked.connect(self.add_new_card)
 
-        add_row.addWidget(self.due_date_input, 1)
-        add_row.addWidget(add_button)
+        add_row.addLayout(due_date_group, 1)
+        add_row.addWidget(add_button, 0, Qt.AlignmentFlag.AlignBottom)
 
         shell_layout.addWidget(self.card_name_input)
         shell_layout.addLayout(add_row)
@@ -237,65 +225,52 @@ class CreditCardWidget(QMainWindow):
         root_layout.addWidget(shell)
         self.setCentralWidget(root)
 
-    def add_new_bill(self) -> None:
+    def add_new_card(self) -> None:
         card_name = self.card_name_input.text().strip()
-        selected_date = self.due_date_input.date()
+        due_date = self.due_date_input.date()
 
         if not card_name:
             self._show_warning("Card name cannot be empty.")
             self.card_name_input.setFocus()
             return
-        if not selected_date.isValid():
-            self._show_warning("Please select a valid due date.")
+        if not due_date.isValid():
+            self._show_warning("Please select a valid statement due date.")
             return
-
         try:
-            add_bill(card_name, selected_date.toPyDate())
+            add_card(card_name, due_date.toPyDate())
         except (ValueError, DatabaseError) as exc:
             self._show_error(str(exc))
             return
 
         self.card_name_input.clear()
         self.card_name_input.setFocus()
-        self.refresh_bills()
+        self.refresh_cards()
 
-    def refresh_bills(self) -> None:
-        self._clear_bill_list()
+    def refresh_cards(self) -> None:
+        self._clear_card_list()
         try:
-            unpaid_bills = get_bills(is_paid=False)
-            paid_bills = get_bills(is_paid=True)
+            cards = get_cards()
         except DatabaseError as exc:
             self._show_error(str(exc))
             return
 
-        unpaid_heading = QLabel(f"UPCOMING  ·  {len(unpaid_bills)}")
+        unpaid_heading = QLabel(f"MONTHLY CARDS  ·  {len(cards)}")
         unpaid_heading.setObjectName("sectionTitle")
         self.list_layout.addWidget(unpaid_heading)
 
-        if unpaid_bills:
-            for bill in unpaid_bills:
-                self.list_layout.addWidget(self._create_unpaid_card(bill))
+        if cards:
+            for card in cards:
+                self.list_layout.addWidget(self._create_card(card))
         else:
             self.list_layout.addWidget(
-                self._empty_label("No unpaid bills. A pleasantly quiet list.")
+                self._empty_label("No cards yet. Add one current due date above.")
             )
-
-        paid_heading = QLabel(f"PAID  ·  {len(paid_bills)}")
-        paid_heading.setObjectName("sectionTitle")
-        paid_heading.setContentsMargins(0, 8, 0, 0)
-        self.list_layout.addWidget(paid_heading)
-
-        if paid_bills:
-            for bill in paid_bills:
-                self.list_layout.addWidget(self._create_paid_card(bill))
-        else:
-            self.list_layout.addWidget(self._empty_label("Paid bills will appear here."))
 
         self.list_layout.addStretch(1)
 
-    def _create_unpaid_card(self, bill: CreditCardBill) -> QFrame:
+    def _create_card(self, credit_card: CreditCard) -> QFrame:
         card = QFrame()
-        card.setObjectName("billCard")
+        card.setObjectName("cardPanel")
         layout = QHBoxLayout(card)
         layout.setContentsMargins(14, 12, 12, 12)
         layout.setSpacing(8)
@@ -303,74 +278,43 @@ class CreditCardWidget(QMainWindow):
         details = QVBoxLayout()
         details.setSpacing(3)
 
-        name = QLabel(bill.card_name)
+        name = QLabel(credit_card.card_name)
         name.setObjectName("cardName")
-        due_date = QLabel(f"Due {bill.due_date.strftime('%b %d, %Y')}")
-        due_date.setObjectName("dueDate")
+        pay_by = QLabel(
+            f"Pay by {credit_card.pay_by_date.strftime('%b %d, %Y')}"
+        )
+        pay_by.setObjectName("dueDate")
 
-        days_left = (bill.due_date - date.today()).days
-        status = QLabel(self._days_remaining_text(days_left))
+        days_left = (credit_card.pay_by_date - date.today()).days
+        status = QLabel(self._pay_by_status_text(days_left))
         if days_left < 0:
-            status.setObjectName("daysOverdue")
+            status.setObjectName("daysPastPayBy")
         elif days_left == 0:
             status.setObjectName("daysToday")
         else:
             status.setObjectName("daysNormal")
 
         details.addWidget(name)
-        details.addWidget(due_date)
+        details.addWidget(pay_by)
         details.addWidget(status)
 
         paid_button = QPushButton("Mark paid")
         paid_button.setObjectName("paidButton")
-        paid_button.clicked.connect(partial(self._mark_paid, bill.id))
+        paid_button.clicked.connect(partial(self._mark_paid, credit_card.id))
 
         layout.addLayout(details, 1)
         layout.addWidget(paid_button, 0, Qt.AlignmentFlag.AlignVCenter)
         return card
 
-    def _create_paid_card(self, bill: CreditCardBill) -> QFrame:
-        card = QFrame()
-        card.setObjectName("paidCard")
-        layout = QHBoxLayout(card)
-        layout.setContentsMargins(14, 10, 10, 10)
-
-        details = QVBoxLayout()
-        details.setSpacing(2)
-
-        name = QLabel(bill.card_name)
-        name.setObjectName("paidCardName")
-        paid_text = QLabel(f"Due {bill.due_date.strftime('%b %d, %Y')}  ·  Paid")
-        paid_text.setObjectName("paidText")
-
-        details.addWidget(name)
-        details.addWidget(paid_text)
-
-        restore_button = QPushButton("Undo")
-        restore_button.setObjectName("restoreButton")
-        restore_button.clicked.connect(partial(self._mark_unpaid, bill.id))
-
-        layout.addLayout(details, 1)
-        layout.addWidget(restore_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        return card
-
-    def _mark_paid(self, bill_id: int) -> None:
+    def _mark_paid(self, card_id: int) -> None:
         try:
-            mark_bill_paid(bill_id)
-        except DatabaseError as exc:
+            mark_card_paid(card_id)
+        except (ValueError, DatabaseError) as exc:
             self._show_error(str(exc))
             return
-        self.refresh_bills()
+        self.refresh_cards()
 
-    def _mark_unpaid(self, bill_id: int) -> None:
-        try:
-            mark_bill_unpaid(bill_id)
-        except DatabaseError as exc:
-            self._show_error(str(exc))
-            return
-        self.refresh_bills()
-
-    def _clear_bill_list(self) -> None:
+    def _clear_card_list(self) -> None:
         while self.list_layout.count():
             item = self.list_layout.takeAt(0)
             widget = item.widget()
@@ -378,15 +322,15 @@ class CreditCardWidget(QMainWindow):
                 widget.deleteLater()
 
     @staticmethod
-    def _days_remaining_text(days_left: int) -> str:
+    def _pay_by_status_text(days_left: int) -> str:
         if days_left == 0:
-            return "Due today"
+            return "Pay today"
         if days_left < 0:
-            overdue_days = abs(days_left)
-            suffix = "day" if overdue_days == 1 else "days"
-            return f"Overdue by {overdue_days} {suffix}"
+            past_days = abs(days_left)
+            suffix = "day" if past_days == 1 else "days"
+            return f"{past_days} {suffix} past pay-by"
         suffix = "day" if days_left == 1 else "days"
-        return f"{days_left} {suffix} remaining"
+        return f"{days_left} {suffix} until pay-by"
 
     @staticmethod
     def _empty_label(text: str) -> QLabel:
@@ -397,11 +341,11 @@ class CreditCardWidget(QMainWindow):
         return label
 
     def _show_warning(self, message: str) -> None:
-        QMessageBox.warning(self, "Check the bill", message)
+        QMessageBox.warning(self, "Check the card", message)
 
     def _show_error(self, message: str) -> None:
         QMessageBox.critical(
             self,
             "Something went wrong",
-            f"The bill database could not be updated.\n\n{message}",
+            f"The card database could not be updated.\n\n{message}",
         )
