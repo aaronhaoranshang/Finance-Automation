@@ -4,7 +4,7 @@ import sys
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from db import DatabaseError, initialize_database
+from db import DatabaseError, init_db
 from ui import CreditCardWidget
 
 
@@ -14,7 +14,7 @@ def main() -> int:
     app.setOrganizationName("Credit Card Widget")
 
     try:
-        initialize_database()
+        init_db()
     except DatabaseError as exc:
         QMessageBox.critical(
             None,
