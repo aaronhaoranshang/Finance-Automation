@@ -54,8 +54,8 @@ def test_dashboard_service_money_frame_and_summary(app_modules):
                 "transaction_date": "2026-04-04",
                 "transaction_type": "income",
                 "amount": 500.0,
-                "category": "",
-                "subcategory": "",
+                "category": "Income",
+                "subcategory": "Salary",
             },
             {
                 "transaction_id": "payment-1",
@@ -65,22 +65,64 @@ def test_dashboard_service_money_frame_and_summary(app_modules):
                 "category": "",
                 "subcategory": "",
             },
+            {
+                "transaction_id": "debt-payment-1",
+                "transaction_date": "2026-04-06",
+                "transaction_type": "debt_payment",
+                "amount": -75.0,
+                "category": "",
+                "subcategory": "",
+            },
+            {
+                "transaction_id": "transfer-1",
+                "transaction_date": "2026-04-07",
+                "transaction_type": "transfer",
+                "amount": -200.0,
+                "category": "",
+                "subcategory": "",
+            },
+            {
+                "transaction_id": "ignored-1",
+                "transaction_date": "2026-04-08",
+                "transaction_type": "ignored",
+                "amount": 300.0,
+                "category": "Excluded",
+                "subcategory": "",
+            },
+            {
+                "transaction_id": "excluded-expense-1",
+                "transaction_date": "2026-04-09",
+                "transaction_type": "expense",
+                "amount": 25.0,
+                "category": "Excluded",
+                "subcategory": "",
+            },
         ]
     )
 
     framed = dashboard_service.money_frame(raw)
     assert framed.loc[framed["transaction_id"] == "expense-1", "category"].iloc[0] == "Uncategorized"
+    ignored = framed.loc[framed["transaction_id"] == "ignored-1"].iloc[0]
+    assert ignored["gross_spend"] == 0
+    assert ignored["net_spend"] == 0
+    assert ignored["income_amount"] == 0
+    excluded_expense = framed.loc[framed["transaction_id"] == "excluded-expense-1"].iloc[0]
+    assert excluded_expense["gross_spend"] == 25.0
+    assert excluded_expense["net_spend"] == 25.0
 
     summary = dashboard_service.summary_by_month(framed)
     row = summary.iloc[0]
     assert row["month"] == "2026-04"
-    assert row["gross_spend"] == 100.0
+    assert row["gross_spend"] == 125.0
     assert row["refunds_credits"] == 10.0
     assert row["reimbursements"] == 20.0
-    assert row["net_spend"] == 70.0
+    assert row["net_spend"] == 95.0
     assert row["income"] == 500.0
     assert row["card_payments"] == 50.0
-    assert row["transactions"] == 5
+    assert row["debt_payments"] == 75.0
+    assert row["transfers"] == 200.0
+    assert row["ignored_movement"] == 625.0
+    assert row["transactions"] == 9
 
 
 def test_category_service_validation_and_user_category(app_modules):

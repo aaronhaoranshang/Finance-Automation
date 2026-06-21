@@ -609,14 +609,13 @@ def apply_transaction_type_defaults(df: pd.DataFrame) -> pd.DataFrame:
     updated.loc[ignored_mask, "subcategory"] = ""
 
     income_mask = updated["transaction_type"].eq("income")
-    income_category_invalid = income_mask & ~updated["category"].fillna("").eq("Income")
     income_subcategory_missing = income_mask & (
         updated["subcategory"].isna()
         | updated["subcategory"].eq("")
         | updated["subcategory"].eq("Uncategorized")
     )
     updated.loc[income_mask, "category"] = "Income"
-    updated.loc[income_category_invalid | income_subcategory_missing, "subcategory"] = "Other Income"
+    updated.loc[income_subcategory_missing, "subcategory"] = "Other Income"
 
     for transaction_type, (category, subcategory) in TRANSACTION_TYPE_DEFAULTS.items():
         uncategorized_placeholder = updated["category"].eq("Other") & updated["subcategory"].eq("Uncategorized")
