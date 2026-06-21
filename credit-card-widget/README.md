@@ -51,6 +51,10 @@ dist/Credit Card Due.app
 dist/Credit Card Due-macOS.zip
 ```
 
+The build also runs the packaged executable against a temporary DuckDB
+database containing a card row. It stops before creating the ZIP if packaged
+imports or database loading fail.
+
 Send the ZIP file. Your friend can unzip it, drag **Credit Card Due** into
 Applications, and double-click it.
 

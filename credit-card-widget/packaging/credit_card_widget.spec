@@ -21,7 +21,9 @@ a = Analysis(
     pathex=[str(project_root)],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    # DuckDB's native extension imports uuid dynamically while converting
+    # result values, so static analysis cannot discover it.
+    hiddenimports=["uuid"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -66,7 +68,7 @@ if sys.platform == "darwin":
         bundle_identifier="com.aaronshang.creditcarddue",
         info_plist={
             "CFBundleDisplayName": "Credit Card Due",
-            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleShortVersionString": "1.0.1",
             "NSHighResolutionCapable": True,
         },
     )
