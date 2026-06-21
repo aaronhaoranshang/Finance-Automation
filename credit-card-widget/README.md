@@ -36,6 +36,8 @@ On Windows, activate the environment with:
 
 ## Add a card
 
+Open the `⋯` menu in the top-right corner and choose **Add a card**.
+
 Enter:
 
 - **Card name**: a recognizable name such as `Travel Visa`
@@ -94,8 +96,9 @@ soft-deactivates the card.
 
 ## Reset all data
 
-Use **Reset all data** at the bottom of the app to remove all locally stored
-cards, including sample cards. A confirmation dialog protects this action.
+Open the top-right `⋯` menu and choose **Reset all data** to remove all locally
+stored cards, including sample cards. A confirmation dialog protects this
+action.
 
 You can also reset from the command line:
 

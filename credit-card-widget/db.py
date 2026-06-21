@@ -185,10 +185,7 @@ def _migrate_legacy_cards(connection: duckdb.DuckDBPyConnection) -> None:
         "paid_at",
         "created_at",
     }
-    if not (
-        recurring_schema.issubset(columns)
-        or one_time_schema.issubset(columns)
-    ):
+    if not (recurring_schema.issubset(columns) or one_time_schema.issubset(columns)):
         return
 
     now = datetime.now()
@@ -209,11 +206,7 @@ def _migrate_legacy_cards(connection: duckdb.DuckDBPyConnection) -> None:
             status = (
                 PAID
                 if paid_at is not None or is_paid
-                else (
-                    PAYMENT_DUE
-                    if today >= statement_date
-                    else NO_PAYMENT_REQUIRED
-                )
+                else (PAYMENT_DUE if today >= statement_date else NO_PAYMENT_REQUIRED)
             )
             imported.append(
                 (
@@ -257,11 +250,7 @@ def _migrate_legacy_cards(connection: duckdb.DuckDBPyConnection) -> None:
                 )
                 status = PAID
             else:
-                status = (
-                    PAYMENT_DUE
-                    if today >= statement_date
-                    else NO_PAYMENT_REQUIRED
-                )
+                status = PAYMENT_DUE if today >= statement_date else NO_PAYMENT_REQUIRED
             imported.append(
                 (
                     card_name,
@@ -305,9 +294,7 @@ def _migrate_legacy_cards(connection: duckdb.DuckDBPyConnection) -> None:
                 """,
                 [next_id, *record],
             )
-        connection.execute(
-            f"ALTER TABLE {legacy_table} RENAME TO {backup_name}"
-        )
+        connection.execute(f"ALTER TABLE {legacy_table} RENAME TO {backup_name}")
         connection.execute("COMMIT")
     except Exception:
         connection.execute("ROLLBACK")
@@ -395,6 +382,25 @@ def calculate_due_date(
     return clamp_day(year, month, due_day)
 
 
+def _calculate_statement_date_for_due_date(
+    due_date: date,
+    due_day: int,
+    statement_day: int,
+) -> date:
+    """Recover the anchored statement date associated with a due date."""
+    if not isinstance(due_date, date):
+        raise ValueError("Due date must be a valid date.")
+    _validate_day(due_day, "Due day")
+    _validate_day(statement_day, "Statement day")
+    month_offset = 0 if due_day > statement_day else -1
+    year, month = _shift_year_month(
+        due_date.year,
+        due_date.month,
+        month_offset,
+    )
+    return clamp_day(year, month, statement_day)
+
+
 def calculate_pay_by_date(
     due_date: date,
     safety_buffer_days: int,
@@ -469,9 +475,7 @@ def _ensure_unique_name(
         parameters.append(exclude_card_id)
     query += " LIMIT 1"
     if connection.execute(query, parameters).fetchone():
-        raise ValueError(
-            "This card already exists. Edit the existing card instead."
-        )
+        raise ValueError("This card already exists. Edit the existing card instead.")
 
 
 def _row_to_card(row: tuple[object, ...]) -> CreditCard:
@@ -509,21 +513,17 @@ def add_card(
         safety_buffer_days,
     )
     reference = today or date.today()
-    statement_date = calculate_statement_date(
+    statement_date = clamp_day(
+        reference.year,
+        reference.month,
         statement_day,
-        reference,
-        on_or_after=True,
     )
     due_date = calculate_due_date(
         statement_date,
         due_day,
         statement_day,
     )
-    status = (
-        PAYMENT_DUE
-        if reference >= statement_date
-        else NO_PAYMENT_REQUIRED
-    )
+    status = PAYMENT_DUE if reference >= statement_date else NO_PAYMENT_REQUIRED
     now = datetime.now()
 
     connection = _connect()
@@ -578,7 +578,7 @@ def add_card(
 
 
 def refresh_card_cycles(today: date | None = None) -> None:
-    """Move waiting or paid cards into PAYMENT_DUE when a statement arrives."""
+    """Normalize cycle dates and activate cards when their statement arrives."""
     reference = today or date.today()
     connection = _connect()
     try:
@@ -587,52 +587,78 @@ def refresh_card_cycles(today: date | None = None) -> None:
             SELECT {CARD_COLUMNS}
             FROM {TABLE_NAME}
             WHERE is_active = TRUE
-              AND status IN (?, ?)
-            """,
-            [NO_PAYMENT_REQUIRED, PAID],
+            """
         ).fetchall()
-        updates: list[tuple[date, date, datetime, int]] = []
+        updates: list[tuple[date, date, str, datetime, int]] = []
         now = datetime.now()
+
         for row in rows:
             card = _row_to_card(row)
             statement_date = card.current_statement_date
+
             if statement_date is None:
+                statement_date = calculate_statement_date(
+                    card.statement_day,
+                    reference,
+                    on_or_after=card.status == PAID,
+                )
+
+            if card.status == PAYMENT_DUE and statement_date > reference:
                 statement_date = calculate_statement_date(
                     card.statement_day,
                     reference,
                     on_or_after=False,
                 )
-            if reference < statement_date:
-                continue
+            elif card.status == NO_PAYMENT_REQUIRED:
+                current_month_statement = clamp_day(
+                    reference.year,
+                    reference.month,
+                    card.statement_day,
+                )
+                if current_month_statement <= reference and (
+                    statement_date is None or statement_date > reference
+                ):
+                    statement_date = current_month_statement
 
-            current_cycle_statement = statement_date
-            current_cycle_due = card.current_due_date or calculate_due_date(
+            due_date = calculate_due_date(
                 statement_date,
                 card.due_day,
                 card.statement_day,
             )
-            updates.append(
-                (
-                    current_cycle_statement,
-                    current_cycle_due,
-                    now,
-                    card.id,
-                )
-            )
+            status = card.status
+            if status in {NO_PAYMENT_REQUIRED, PAID} and reference >= statement_date:
+                status = PAYMENT_DUE
 
-        if updates:
-            connection.executemany(
-                f"""
-                UPDATE {TABLE_NAME}
-                SET
-                    current_statement_date = ?,
-                    current_due_date = ?,
-                    status = '{PAYMENT_DUE}',
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                updates,
-            )
+            if (
+                statement_date != card.current_statement_date
+                or due_date != card.current_due_date
+                or status != card.status
+            ):
+                updates.append(
+                    (
+                        statement_date,
+                        due_date,
+                        status,
+                        now,
+                        card.id,
+                    )
+                )
+
+        if not updates:
+            return
+
+        connection.executemany(
+            f"""
+            UPDATE {TABLE_NAME}
+            SET
+                current_statement_date = ?,
+                current_due_date = ?,
+                status = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            updates,
+        )
     except duckdb.Error as exc:
         raise DatabaseError(str(exc)) from exc
     finally:
@@ -696,19 +722,33 @@ def update_card(
         )
 
         if card.status == PAYMENT_DUE:
-            statement_date = calculate_statement_date(
+            existing_statement = card.current_statement_date
+            if existing_statement is None:
+                existing_statement = calculate_statement_date(
+                    card.statement_day,
+                    reference,
+                    on_or_after=False,
+                )
+            statement_date = clamp_day(
+                existing_statement.year,
+                existing_statement.month,
                 statement_day,
-                reference,
-                on_or_after=False,
             )
             status = PAYMENT_DUE
         elif card.status == PAID:
-            statement_date = calculate_statement_date(
+            existing_statement = card.current_statement_date
+            if existing_statement is None:
+                existing_statement = calculate_statement_date(
+                    statement_day,
+                    reference,
+                    on_or_after=True,
+                )
+            statement_date = clamp_day(
+                existing_statement.year,
+                existing_statement.month,
                 statement_day,
-                reference,
-                on_or_after=True,
             )
-            if statement_date <= reference:
+            while statement_date <= reference:
                 statement_date = _shift_cycle_statement(
                     statement_date,
                     statement_day,
@@ -716,16 +756,12 @@ def update_card(
                 )
             status = PAID
         else:
-            statement_date = calculate_statement_date(
+            statement_date = clamp_day(
+                reference.year,
+                reference.month,
                 statement_day,
-                reference,
-                on_or_after=True,
             )
-            status = (
-                PAYMENT_DUE
-                if reference >= statement_date
-                else NO_PAYMENT_REQUIRED
-            )
+            status = PAYMENT_DUE if reference >= statement_date else NO_PAYMENT_REQUIRED
 
         due_date = calculate_due_date(
             statement_date,
@@ -817,11 +853,18 @@ def mark_card_paid(
             date.today(),
             on_or_after=False,
         )
+        effective_paid_at = paid_at or datetime.now()
         next_statement_date = _shift_cycle_statement(
             statement_date,
             card.statement_day,
             1,
         )
+        while next_statement_date <= effective_paid_at.date():
+            next_statement_date = _shift_cycle_statement(
+                next_statement_date,
+                card.statement_day,
+                1,
+            )
         next_due_date = calculate_due_date(
             next_statement_date,
             card.due_day,
@@ -843,7 +886,7 @@ def mark_card_paid(
                 next_statement_date,
                 next_due_date,
                 PAID,
-                paid_at or datetime.now(),
+                effective_paid_at,
                 card.current_due_date,
                 datetime.now(),
                 card_id,
@@ -867,10 +910,10 @@ def undo_last_paid(card_id: int) -> None:
         if card.current_statement_date is None:
             raise ValueError("The previous statement cycle cannot be restored.")
 
-        previous_statement_date = _shift_cycle_statement(
-            card.current_statement_date,
+        previous_statement_date = _calculate_statement_date_for_due_date(
+            card.last_paid_due_date,
+            card.due_day,
             card.statement_day,
-            -1,
         )
         connection.execute(
             f"""

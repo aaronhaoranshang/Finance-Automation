@@ -12,16 +12,18 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QLayout,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -65,11 +67,6 @@ QFrame#summaryCard {
 QFrame#summaryClear {
     background: #19241f;
     border: 1px solid #294537;
-    border-radius: 16px;
-}
-QFrame#formCard {
-    background: #1c2028;
-    border: 1px solid #2b313c;
     border-radius: 16px;
 }
 QFrame#cardPanel {
@@ -183,6 +180,40 @@ QPushButton#linkButton {
 QPushButton#linkButton:hover {
     color: #c5bcff;
 }
+QToolButton#menuButton {
+    background: #252a34;
+    border: 1px solid #383f4d;
+    border-radius: 10px;
+    color: #dfe4ec;
+    font-size: 20px;
+    font-weight: 700;
+    min-height: 34px;
+    min-width: 38px;
+}
+QToolButton#menuButton:hover {
+    background: #343b48;
+}
+QToolButton#menuButton::menu-indicator {
+    image: none;
+}
+QMenu {
+    background: #20242d;
+    border: 1px solid #383f4d;
+    border-radius: 8px;
+    padding: 6px;
+}
+QMenu::item {
+    border-radius: 6px;
+    padding: 8px 22px 8px 12px;
+}
+QMenu::item:selected {
+    background: #7657ff;
+}
+QMenu::separator {
+    background: #383f4d;
+    height: 1px;
+    margin: 5px 8px;
+}
 QScrollArea, QScrollArea > QWidget > QWidget {
     background: transparent;
     border: 0;
@@ -215,23 +246,30 @@ def _format_date(value: date | None) -> str:
     return value.strftime("%b %d, %Y").replace(" 0", " ")
 
 
-def _clear_layout(layout: QVBoxLayout | QHBoxLayout) -> None:
+def _clear_layout(layout: QLayout) -> None:
     while layout.count():
         item = layout.takeAt(0)
         child_layout = item.layout()
         widget = item.widget()
         if child_layout is not None:
-            _clear_layout(child_layout)  # type: ignore[arg-type]
+            _clear_layout(child_layout)
         if widget is not None:
+            widget.hide()
+            widget.setParent(None)
             widget.deleteLater()
 
 
-class EditCardDialog(QDialog):
-    """Small editor for recurring card configuration."""
+class CardFormDialog(QDialog):
+    """Form used to add or edit recurring card configuration."""
 
-    def __init__(self, card: CreditCard, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        card: CreditCard | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Edit Card")
+        is_editing = card is not None
+        self.setWindowTitle("Edit Card" if is_editing else "Add Card")
         self.setModal(True)
         self.setMinimumWidth(350)
         self.setStyleSheet(APP_STYLESHEET)
@@ -240,19 +278,20 @@ class EditCardDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(14)
 
-        heading = QLabel("Edit credit card")
+        heading = QLabel("Edit credit card" if is_editing else "Add a card")
         heading.setObjectName("summaryTitle")
         layout.addWidget(heading)
 
         form = QFormLayout()
         form.setSpacing(10)
 
-        self.name_input = QLineEdit(card.card_name)
-        self.statement_day_input = self._day_input(card.statement_day)
-        self.due_day_input = self._day_input(card.due_day)
+        self.name_input = QLineEdit(card.card_name if card else "")
+        self.name_input.setPlaceholderText("Card name")
+        self.statement_day_input = self._day_input(card.statement_day if card else 5)
+        self.due_day_input = self._day_input(card.due_day if card else 25)
         self.buffer_input = QSpinBox()
         self.buffer_input.setRange(0, 15)
-        self.buffer_input.setValue(card.safety_buffer_days)
+        self.buffer_input.setValue(card.safety_buffer_days if card else 7)
         self.buffer_input.setSuffix(" days")
 
         form.addRow("Card name", self.name_input)
@@ -261,10 +300,23 @@ class EditCardDialog(QDialog):
         form.addRow("Safety buffer", self.buffer_input)
         layout.addLayout(form)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
+        helper = QLabel(
+            "Pay-by is a planning date before the official issuer due date."
         )
+        helper.setObjectName("helperText")
+        helper.setWordWrap(True)
+        layout.addWidget(helper)
+
+        accept_button = (
+            QDialogButtonBox.StandardButton.Save
+            if is_editing
+            else QDialogButtonBox.StandardButton.Ok
+        )
+        buttons = QDialogButtonBox(
+            accept_button | QDialogButtonBox.StandardButton.Cancel
+        )
+        if not is_editing:
+            buttons.button(accept_button).setText("Add Card")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -292,8 +344,8 @@ class CreditCardWidget(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Credit Card Due")
-        self.setMinimumSize(420, 700)
-        self.resize(450, 820)
+        self.setMinimumSize(420, 560)
+        self.resize(450, 700)
         self.setMaximumWidth(480)
         self.setStyleSheet(APP_STYLESHEET)
         self.cards: list[CreditCard] = []
@@ -312,15 +364,33 @@ class CreditCardWidget(QMainWindow):
         shell_layout.setContentsMargins(20, 20, 20, 18)
         shell_layout.setSpacing(14)
 
+        header = QHBoxLayout()
+        header.setSpacing(10)
+
         title = QLabel("Credit Card Due")
         title.setObjectName("title")
         title.setFont(QFont(title.font().family(), 24, QFont.Weight.Bold))
-        subtitle = QLabel(
-            "Track when statements are ready and when payments are due."
-        )
+        header.addWidget(title, 1)
+
+        menu_button = QToolButton()
+        menu_button.setObjectName("menuButton")
+        menu_button.setText("⋯")
+        menu_button.setToolTip("More options")
+        menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+
+        menu = QMenu(menu_button)
+        add_action = menu.addAction("Add a card")
+        add_action.triggered.connect(self._add_card)
+        menu.addSeparator()
+        reset_action = menu.addAction("Reset all data")
+        reset_action.triggered.connect(self._reset_all_data)
+        menu_button.setMenu(menu)
+        header.addWidget(menu_button)
+
+        subtitle = QLabel("Track when statements are ready and when payments are due.")
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
-        shell_layout.addWidget(title)
+        shell_layout.addLayout(header)
         shell_layout.addWidget(subtitle)
 
         self.summary_frame = QFrame()
@@ -328,9 +398,6 @@ class CreditCardWidget(QMainWindow):
         self.summary_layout.setContentsMargins(15, 14, 15, 14)
         self.summary_layout.setSpacing(6)
         shell_layout.addWidget(self.summary_frame)
-
-        form_card = self._build_add_form()
-        shell_layout.addWidget(form_card)
 
         self.success_row = QWidget()
         success_layout = QHBoxLayout(self.success_row)
@@ -359,105 +426,30 @@ class CreditCardWidget(QMainWindow):
         self.list_layout.setContentsMargins(0, 2, 0, 2)
         self.list_layout.setSpacing(10)
         self.list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.list_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         scroll.setWidget(self.list_container)
         shell_layout.addWidget(scroll, 1)
-
-        footer = QHBoxLayout()
-        footer.addStretch(1)
-        reset_button = QPushButton("Reset all data")
-        reset_button.setObjectName("dangerButton")
-        reset_button.clicked.connect(self._reset_all_data)
-        footer.addWidget(reset_button)
-        shell_layout.addLayout(footer)
 
         root_layout.addWidget(shell)
         self.setCentralWidget(root)
 
-    def _build_add_form(self) -> QFrame:
-        frame = QFrame()
-        frame.setObjectName("formCard")
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(14, 13, 14, 13)
-        layout.setSpacing(9)
-
-        heading = QLabel("Add a card")
-        heading.setObjectName("sectionTitle")
-        layout.addWidget(heading)
-
-        self.card_name_input = QLineEdit()
-        self.card_name_input.setPlaceholderText("Card name")
-        self.card_name_input.setClearButtonEnabled(True)
-        layout.addWidget(self.card_name_input)
-
-        day_grid = QGridLayout()
-        day_grid.setHorizontalSpacing(8)
-        day_grid.setVerticalSpacing(5)
-
-        statement_label = QLabel("Statement day")
-        statement_label.setObjectName("helperText")
-        due_label = QLabel("Due day")
-        due_label.setObjectName("helperText")
-        buffer_label = QLabel("Pay early")
-        buffer_label.setObjectName("helperText")
-
-        self.statement_day_input = self._day_input(5)
-        self.due_day_input = self._day_input(25)
-        self.buffer_input = QSpinBox()
-        self.buffer_input.setRange(0, 15)
-        self.buffer_input.setValue(7)
-        self.buffer_input.setSuffix(" days")
-
-        day_grid.addWidget(statement_label, 0, 0)
-        day_grid.addWidget(due_label, 0, 1)
-        day_grid.addWidget(buffer_label, 0, 2)
-        day_grid.addWidget(self.statement_day_input, 1, 0)
-        day_grid.addWidget(self.due_day_input, 1, 1)
-        day_grid.addWidget(self.buffer_input, 1, 2)
-        layout.addLayout(day_grid)
-
-        helper = QLabel(
-            "Statement day is when your statement usually becomes available.\n"
-            "Due day is the official payment due day. Pay-by is a conservative "
-            "planning date before it."
-        )
-        helper.setObjectName("helperText")
-        helper.setWordWrap(True)
-        layout.addWidget(helper)
-
-        add_button = QPushButton("Add Card")
-        add_button.clicked.connect(self.add_new_card)
-        layout.addWidget(add_button)
-        self.card_name_input.returnPressed.connect(self.add_new_card)
-        return frame
-
-    @staticmethod
-    def _day_input(value: int) -> QSpinBox:
-        input_widget = QSpinBox()
-        input_widget.setRange(1, 31)
-        input_widget.setValue(value)
-        input_widget.setPrefix("Day ")
-        input_widget.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
-        return input_widget
-
-    def add_new_card(self) -> None:
-        card_name = self.card_name_input.text()
+    def _add_card(self) -> None:
+        dialog = CardFormDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        card_name, statement_day, due_day, buffer_days = dialog.values()
         try:
             add_card(
                 card_name,
-                self.statement_day_input.value(),
-                self.due_day_input.value(),
-                self.buffer_input.value(),
+                statement_day,
+                due_day,
+                buffer_days,
             )
         except (ValueError, DatabaseError) as exc:
             self._show_error(str(exc))
             return
 
         cleaned_name = " ".join(card_name.split())
-        self.card_name_input.clear()
-        self.card_name_input.setFocus()
         self._show_success(f"Added {cleaned_name}.")
         self.refresh_cards()
 
@@ -484,12 +476,8 @@ class CreditCardWidget(QMainWindow):
 
             title = QLabel("✓ No payment required")
             title.setObjectName("statusGreen")
-            title.setFont(
-                QFont(title.font().family(), 16, QFont.Weight.Bold)
-            )
-            detail = QLabel(
-                "All cards are paid or waiting for the next statement."
-            )
+            title.setFont(QFont(title.font().family(), 16, QFont.Weight.Bold))
+            detail = QLabel("All cards are paid or waiting for the next statement.")
             detail.setObjectName("mutedText")
             detail.setWordWrap(True)
             self.summary_layout.addWidget(title)
@@ -551,6 +539,10 @@ class CreditCardWidget(QMainWindow):
     def _create_card_panel(self, card: CreditCard) -> QFrame:
         panel = QFrame()
         panel.setObjectName("cardPanel")
+        panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Minimum,
+        )
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(14, 12, 12, 11)
         layout.setSpacing(5)
@@ -569,9 +561,7 @@ class CreditCardWidget(QMainWindow):
             countdown.setObjectName(self._payment_status_style(card))
             due = QLabel(f"Official due date: {_format_date(card.current_due_date)}")
             due.setObjectName("detailText")
-            pay_by = QLabel(
-                f"Pay-by planning date: {_format_date(card.pay_by_date)}"
-            )
+            pay_by = QLabel(f"Pay-by planning date: {_format_date(card.pay_by_date)}")
             pay_by.setObjectName("detailText")
             layout.addWidget(countdown)
             layout.addWidget(due)
@@ -668,7 +658,7 @@ class CreditCardWidget(QMainWindow):
         self.refresh_cards()
 
     def _edit_card(self, card: CreditCard) -> None:
-        dialog = EditCardDialog(card, self)
+        dialog = CardFormDialog(card, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         card_name, statement_day, due_day, buffer_days = dialog.values()
@@ -748,9 +738,7 @@ class CreditCardWidget(QMainWindow):
             self.undo_button.hide()
         else:
             self.undo_button.show()
-            self.undo_button.clicked.connect(
-                partial(self._undo_paid, undo_card_id)
-            )
+            self.undo_button.clicked.connect(partial(self._undo_paid, undo_card_id))
         self.success_row.show()
 
     def _show_error(self, message: str) -> None:
