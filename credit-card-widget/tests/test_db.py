@@ -18,6 +18,20 @@ def isolated_db(tmp_path, monkeypatch):
     return database_path
 
 
+def test_packaged_macos_default_db_path(monkeypatch):
+    monkeypatch.delenv(db.DB_PATH_ENV, raising=False)
+    monkeypatch.setattr(db.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(db.sys, "platform", "darwin")
+
+    assert db.get_default_db_path() == (
+        db.Path.home()
+        / "Library"
+        / "Application Support"
+        / "Credit Card Due"
+        / "cards.duckdb"
+    )
+
+
 def test_init_db_imports_supported_legacy_schema(tmp_path, monkeypatch):
     database_path = tmp_path / "legacy-cards.duckdb"
     monkeypatch.setenv(db.DB_PATH_ENV, str(database_path))

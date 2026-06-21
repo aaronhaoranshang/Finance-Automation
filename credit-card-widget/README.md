@@ -34,6 +34,35 @@ On Windows, activate the environment with:
 .venv\Scripts\activate
 ```
 
+## Build a clickable macOS app
+
+Your friend does not need Python or Terminal if you send them a packaged app.
+Build it on a Mac with:
+
+```bash
+chmod +x scripts/build_macos.sh
+./scripts/build_macos.sh
+```
+
+The build creates:
+
+```text
+dist/Credit Card Due.app
+dist/Credit Card Due-macOS.zip
+```
+
+Send the ZIP file. Your friend can unzip it, drag **Credit Card Due** into
+Applications, and double-click it.
+
+The current build is unsigned. On first launch, macOS Gatekeeper may require
+the recipient to right-click the app and choose **Open**. Removing that warning
+for general public distribution requires an Apple Developer certificate,
+code signing, and notarization.
+
+Build separately for the target Mac architecture. An Apple Silicon build is
+intended for Apple Silicon Macs; Intel distribution requires an Intel build
+or a separately configured universal build.
+
 ## Add a card
 
 Open the `⋯` menu in the top-right corner and choose **Add a card**.
@@ -127,11 +156,19 @@ or `python db.py --reset`.
 
 ## Database location
 
-By default, DuckDB data is stored in:
+When running from source, DuckDB data is stored in:
 
 ```text
 credit-card-widget/cards.duckdb
 ```
+
+The packaged macOS app stores each user's private database in:
+
+```text
+~/Library/Application Support/Credit Card Due/cards.duckdb
+```
+
+The database is not embedded in the app or shared with other users.
 
 To use another location, set `CREDIT_CARD_WIDGET_DB_PATH`:
 
@@ -160,8 +197,13 @@ credit-card-widget/
 ├── app.py
 ├── db.py
 ├── ui.py
+├── packaging/
+│   └── credit_card_widget.spec
+├── scripts/
+│   └── build_macos.sh
 ├── tests/
 │   └── test_db.py
+├── requirements-build.txt
 ├── requirements.txt
 └── README.md
 ```

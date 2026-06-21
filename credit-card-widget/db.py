@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import os
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -74,7 +75,32 @@ def get_db_path() -> Path:
     configured_path = os.environ.get(DB_PATH_ENV)
     if configured_path:
         return Path(configured_path).expanduser().resolve()
-    return DEFAULT_DB_PATH
+    return get_default_db_path()
+
+
+def get_default_db_path() -> Path:
+    """Return a writable default path for source and packaged app launches."""
+    if not getattr(sys, "frozen", False):
+        return DEFAULT_DB_PATH
+
+    if sys.platform == "darwin":
+        data_directory = (
+            Path.home() / "Library" / "Application Support" / "Credit Card Due"
+        )
+    elif sys.platform == "win32":
+        windows_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        data_directory = (
+            Path(windows_data) if windows_data else Path.home() / "AppData" / "Local"
+        ) / "Credit Card Due"
+    else:
+        linux_data = os.environ.get("XDG_DATA_HOME")
+        data_directory = (
+            Path(linux_data).expanduser()
+            if linux_data
+            else Path.home() / ".local" / "share"
+        ) / "credit-card-due"
+
+    return data_directory / "cards.duckdb"
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
