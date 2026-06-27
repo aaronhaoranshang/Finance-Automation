@@ -39,6 +39,7 @@ class CreditCard:
     status: str
     last_paid_at: datetime | None
     last_paid_due_date: date | None
+    pre_authorized_debit: bool
     created_at: datetime
     updated_at: datetime
     is_active: bool
@@ -64,6 +65,7 @@ CARD_COLUMNS = """
     status,
     last_paid_at,
     last_paid_due_date,
+    pre_authorized_debit,
     created_at,
     updated_at,
     is_active
@@ -105,9 +107,14 @@ def get_default_db_path() -> Path:
 
 def _connect() -> duckdb.DuckDBPyConnection:
     path = get_db_path()
+    uses_default_path = not os.environ.get(DB_PATH_ENV)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        return duckdb.connect(str(path))
+        connection = duckdb.connect(str(path))
+        if uses_default_path and os.name == "posix":
+            path.parent.chmod(0o700)
+            path.chmod(0o600)
+        return connection
     except (OSError, duckdb.Error) as exc:
         raise DatabaseError(str(exc)) from exc
 
@@ -159,6 +166,7 @@ def _create_schema(connection: duckdb.DuckDBPyConnection) -> None:
             status VARCHAR NOT NULL,
             last_paid_at TIMESTAMP,
             last_paid_due_date DATE,
+            pre_authorized_debit BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TIMESTAMP NOT NULL,
             updated_at TIMESTAMP NOT NULL,
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -175,6 +183,25 @@ def _create_schema(connection: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
+
+
+def _ensure_current_schema(connection: duckdb.DuckDBPyConnection) -> None:
+    """Add columns introduced after the first card-level schema shipped."""
+    columns = _table_columns(connection, TABLE_NAME)
+    if "pre_authorized_debit" not in columns:
+        connection.execute(
+            f"""
+            ALTER TABLE {TABLE_NAME}
+            ADD COLUMN pre_authorized_debit BOOLEAN DEFAULT FALSE
+            """
+        )
+        connection.execute(
+            f"""
+            UPDATE {TABLE_NAME}
+            SET pre_authorized_debit = FALSE
+            WHERE pre_authorized_debit IS NULL
+            """
+        )
 
 
 def _legacy_backup_name(connection: duckdb.DuckDBPyConnection) -> str:
@@ -245,6 +272,7 @@ def _migrate_legacy_cards(connection: duckdb.DuckDBPyConnection) -> None:
                     status,
                     paid_at,
                     None,
+                    False,
                     created_at or now,
                     now,
                     True,
@@ -288,6 +316,7 @@ def _migrate_legacy_cards(connection: duckdb.DuckDBPyConnection) -> None:
                     status,
                     paid_at,
                     last_paid_due_date,
+                    False,
                     created_at or now,
                     now,
                     True,
@@ -312,11 +341,12 @@ def _migrate_legacy_cards(connection: duckdb.DuckDBPyConnection) -> None:
                     status,
                     last_paid_at,
                     last_paid_due_date,
+                    pre_authorized_debit,
                     created_at,
                     updated_at,
                     is_active
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [next_id, *record],
             )
@@ -332,6 +362,7 @@ def init_db() -> None:
     connection = _connect()
     try:
         _create_schema(connection)
+        _ensure_current_schema(connection)
         _migrate_legacy_cards(connection)
     except duckdb.Error as exc:
         raise DatabaseError(str(exc)) from exc
@@ -455,6 +486,11 @@ def _validate_buffer(value: int) -> None:
         raise ValueError("Safety buffer must be a whole number from 0 to 15.")
 
 
+def _validate_pre_authorized_debit(value: bool) -> None:
+    if not isinstance(value, bool):
+        raise ValueError("Pre-authorized debit setting must be true or false.")
+
+
 def _normalize_name(card_name: str) -> str:
     if not isinstance(card_name, str):
         raise ValueError("Card name cannot be empty.")
@@ -528,6 +564,7 @@ def add_card(
     statement_day: int,
     due_day: int,
     safety_buffer_days: int = 7,
+    pre_authorized_debit: bool = False,
     *,
     today: date | None = None,
 ) -> int:
@@ -538,6 +575,7 @@ def add_card(
         due_day,
         safety_buffer_days,
     )
+    _validate_pre_authorized_debit(pre_authorized_debit)
     reference = today or date.today()
     statement_date = clamp_day(
         reference.year,
@@ -571,11 +609,12 @@ def add_card(
                     status,
                     last_paid_at,
                     last_paid_due_date,
+                    pre_authorized_debit,
                     created_at,
                     updated_at,
                     is_active
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, TRUE)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, TRUE)
                 """,
                 [
                     card_id,
@@ -586,6 +625,7 @@ def add_card(
                     statement_date,
                     due_date,
                     status,
+                    pre_authorized_debit,
                     now,
                     now,
                 ],
@@ -654,6 +694,23 @@ def refresh_card_cycles(today: date | None = None) -> None:
             status = card.status
             if status in {NO_PAYMENT_REQUIRED, PAID} and reference >= statement_date:
                 status = PAYMENT_DUE
+            if card.pre_authorized_debit and status == PAYMENT_DUE:
+                while due_date < reference:
+                    statement_date = _shift_cycle_statement(
+                        statement_date,
+                        card.statement_day,
+                        1,
+                    )
+                    due_date = calculate_due_date(
+                        statement_date,
+                        card.due_day,
+                        card.statement_day,
+                    )
+                    status = (
+                        PAYMENT_DUE
+                        if reference >= statement_date
+                        else NO_PAYMENT_REQUIRED
+                    )
 
             if (
                 statement_date != card.current_statement_date
@@ -727,6 +784,7 @@ def update_card(
     statement_day: int,
     due_day: int,
     safety_buffer_days: int,
+    pre_authorized_debit: bool | None = None,
     *,
     today: date | None = None,
 ) -> None:
@@ -737,10 +795,14 @@ def update_card(
         due_day,
         safety_buffer_days,
     )
+    if pre_authorized_debit is not None:
+        _validate_pre_authorized_debit(pre_authorized_debit)
     reference = today or date.today()
     connection = _connect()
     try:
         card = _get_card(connection, card_id)
+        if pre_authorized_debit is None:
+            pre_authorized_debit = card.pre_authorized_debit
         _ensure_unique_name(
             connection,
             cleaned_name,
@@ -805,6 +867,7 @@ def update_card(
                 current_statement_date = ?,
                 current_due_date = ?,
                 status = ?,
+                pre_authorized_debit = ?,
                 updated_at = ?
             WHERE id = ?
             """,
@@ -816,6 +879,7 @@ def update_card(
                 statement_date,
                 due_date,
                 status,
+                pre_authorized_debit,
                 datetime.now(),
                 card_id,
             ],
@@ -840,6 +904,28 @@ def delete_card(card_id: int) -> None:
             WHERE id = ?
             """,
             [datetime.now(), card_id],
+        )
+    except ValueError:
+        raise
+    except duckdb.Error as exc:
+        raise DatabaseError(str(exc)) from exc
+    finally:
+        connection.close()
+
+
+def set_pre_authorized_debit(card_id: int, enabled: bool) -> None:
+    """Update whether a card is covered by user-confirmed automatic debit."""
+    _validate_pre_authorized_debit(enabled)
+    connection = _connect()
+    try:
+        _get_card(connection, card_id)
+        connection.execute(
+            f"""
+            UPDATE {TABLE_NAME}
+            SET pre_authorized_debit = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            [enabled, datetime.now(), card_id],
         )
     except ValueError:
         raise
@@ -996,17 +1082,18 @@ def seed_example_cards() -> None:
     """Add optional sample cards for development."""
     init_db()
     samples = [
-        ("Sample Visa", 5, 25, 7),
-        ("Sample Mastercard", 15, 5, 7),
-        ("Sample Store Card", 28, 20, 5),
+        ("Sample Visa", 5, 25, 7, False),
+        ("Sample Mastercard", 15, 5, 7, False),
+        ("Sample Store Card", 28, 20, 5, True),
     ]
-    for card_name, statement_day, due_day, buffer_days in samples:
+    for card_name, statement_day, due_day, buffer_days, pre_authorized in samples:
         try:
             add_card(
                 card_name,
                 statement_day,
                 due_day,
                 buffer_days,
+                pre_authorized,
             )
         except ValueError as exc:
             if "already exists" not in str(exc):

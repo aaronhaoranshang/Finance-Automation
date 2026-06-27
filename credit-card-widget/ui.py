@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import date
 from functools import partial
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QEvent, QPoint, QRect, QTimer, Qt
+from PyQt6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QContextMenuEvent,
+    QFont,
+    QKeySequence,
+    QMouseEvent,
+    QMoveEvent,
+    QResizeEvent,
+    QShortcut,
+)
 from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -40,9 +54,11 @@ from db import (
     get_cards,
     mark_card_paid,
     reset_all_data,
+    set_pre_authorized_debit,
     undo_last_paid,
     update_card,
 )
+from settings import SettingsService, WidgetPreferences
 
 
 APP_STYLESHEET = """
@@ -51,7 +67,6 @@ QMainWindow {
 }
 QWidget {
     color: #f5f7fb;
-    font-family: "SF Pro Text", "Helvetica Neue", Arial;
     font-size: 13px;
 }
 QFrame#shell {
@@ -131,6 +146,21 @@ QLineEdit, QSpinBox {
 }
 QLineEdit:focus, QSpinBox:focus {
     border-color: #7d62ff;
+}
+QCheckBox {
+    color: #dfe4ec;
+    spacing: 8px;
+}
+QCheckBox::indicator {
+    background: #252a34;
+    border: 1px solid #383f4d;
+    border-radius: 5px;
+    height: 18px;
+    width: 18px;
+}
+QCheckBox::indicator:checked {
+    background: #61d995;
+    border-color: #61d995;
 }
 QSpinBox::up-button, QSpinBox::down-button {
     border: 0;
@@ -240,6 +270,68 @@ QMessageBox {
 """
 
 
+def build_app_stylesheet(
+    *,
+    desktop_widget_mode: bool,
+    opacity: float,
+) -> str:
+    """Return normal or translucent desktop-widget styling."""
+    if not desktop_widget_mode:
+        return APP_STYLESHEET
+
+    alpha = max(0, min(255, round(opacity * 255)))
+    panel_alpha = max(0, min(255, alpha - 22))
+    # Qt provides reliable alpha compositing here, but not native macOS
+    # backdrop blur without adding an AppKit bridge such as PyObjC.
+    return (
+        APP_STYLESHEET
+        + f"""
+QMainWindow {{
+    background: transparent;
+}}
+QFrame#shell {{
+    background: rgba(19, 23, 31, {alpha});
+    border: 1px solid rgba(255, 255, 255, 38);
+    border-radius: 26px;
+}}
+QFrame#summaryCard {{
+    background: rgba(42, 47, 59, {panel_alpha});
+    border: 1px solid rgba(255, 255, 255, 35);
+    border-radius: 18px;
+}}
+QFrame#summaryClear {{
+    background: rgba(25, 52, 40, {panel_alpha});
+    border: 1px solid rgba(106, 221, 154, 48);
+    border-radius: 18px;
+}}
+QFrame#cardPanel {{
+    background: rgba(38, 43, 54, {panel_alpha});
+    border: 1px solid rgba(255, 255, 255, 30);
+    border-radius: 17px;
+}}
+QLabel#title {{
+    font-size: 19px;
+}}
+QLabel#subtitle {{
+    color: rgba(235, 239, 247, 185);
+}}
+QLabel#detailText, QLabel#mutedText {{
+    color: rgba(235, 239, 247, 190);
+}}
+QPushButton {{
+    min-height: 30px;
+    padding: 0 11px;
+}}
+QToolButton#menuButton {{
+    background: rgba(255, 255, 255, 22);
+    border: 1px solid rgba(255, 255, 255, 35);
+    min-height: 30px;
+    min-width: 34px;
+}}
+"""
+    )
+
+
 def _format_date(value: date | None) -> str:
     if value is None:
         return "Not available"
@@ -293,15 +385,21 @@ class CardFormDialog(QDialog):
         self.buffer_input.setRange(0, 15)
         self.buffer_input.setValue(card.safety_buffer_days if card else 7)
         self.buffer_input.setSuffix(" days")
+        self.pre_authorized_input = QCheckBox("Active")
+        self.pre_authorized_input.setChecked(
+            card.pre_authorized_debit if card else False
+        )
 
         form.addRow("Card name", self.name_input)
         form.addRow("Statement day", self.statement_day_input)
         form.addRow("Due day", self.due_day_input)
         form.addRow("Safety buffer", self.buffer_input)
+        form.addRow("Pre-authorized debit", self.pre_authorized_input)
         layout.addLayout(form)
 
         helper = QLabel(
-            "Pay-by is a planning date before the official issuer due date."
+            "Pay-by is a planning date before the official issuer due date. "
+            "Pre-authorized debit is user-entered; verify it with your issuer."
         )
         helper.setObjectName("helperText")
         helper.setWordWrap(True)
@@ -329,75 +427,86 @@ class CardFormDialog(QDialog):
         input_widget.setPrefix("Day ")
         return input_widget
 
-    def values(self) -> tuple[str, int, int, int]:
+    def values(self) -> tuple[str, int, int, int, bool]:
         return (
             self.name_input.text(),
             self.statement_day_input.value(),
             self.due_day_input.value(),
             self.buffer_input.value(),
+            self.pre_authorized_input.isChecked(),
         )
 
 
 class CreditCardWidget(QMainWindow):
     """Compact desktop utility for credit-card payment cycles."""
 
-    def __init__(self) -> None:
+    WIDGET_WIDTH = 360
+    WIDGET_HEIGHT = 520
+
+    def __init__(
+        self,
+        settings_service: SettingsService | None = None,
+    ) -> None:
         super().__init__()
+        self.settings_service = settings_service or SettingsService()
+        self.preferences = self.settings_service.load()
+        self._drag_offset: QPoint | None = None
+        self._applying_window_mode = False
+        self._geometry_save_timer = QTimer(self)
+        self._geometry_save_timer.setSingleShot(True)
+        self._geometry_save_timer.setInterval(250)
+        self._geometry_save_timer.timeout.connect(self._save_geometry)
+
         self.setWindowTitle("Credit Card Due")
-        self.setMinimumSize(420, 560)
-        self.resize(450, 700)
-        self.setMaximumWidth(480)
-        self.setStyleSheet(APP_STYLESHEET)
         self.cards: list[CreditCard] = []
 
         self._build_ui()
+        self._build_shortcuts()
+        self._apply_window_mode(refresh=False)
+        self._restore_position()
         self.refresh_cards()
 
     def _build_ui(self) -> None:
         root = QWidget()
-        root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(10, 10, 10, 10)
+        self.root_layout = QVBoxLayout(root)
+        self.root_layout.setContentsMargins(10, 10, 10, 10)
 
-        shell = QFrame()
-        shell.setObjectName("shell")
-        shell_layout = QVBoxLayout(shell)
-        shell_layout.setContentsMargins(20, 20, 20, 18)
-        shell_layout.setSpacing(14)
+        self.shell = QFrame()
+        self.shell.setObjectName("shell")
+        self.shell_layout = QVBoxLayout(self.shell)
+        self.shell_layout.setContentsMargins(20, 20, 20, 18)
+        self.shell_layout.setSpacing(14)
 
         header = QHBoxLayout()
         header.setSpacing(10)
 
-        title = QLabel("Credit Card Due")
-        title.setObjectName("title")
-        title.setFont(QFont(title.font().family(), 24, QFont.Weight.Bold))
-        header.addWidget(title, 1)
+        self.title = QLabel("Credit Card Due")
+        self.title.setObjectName("title")
+        self.title.setFont(QFont(self.title.font().family(), 24, QFont.Weight.Bold))
+        header.addWidget(self.title, 1)
 
-        menu_button = QToolButton()
-        menu_button.setObjectName("menuButton")
-        menu_button.setText("⋯")
-        menu_button.setToolTip("More options")
-        menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.menu_button = QToolButton()
+        self.menu_button.setObjectName("menuButton")
+        self.menu_button.setText("⋯")
+        self.menu_button.setToolTip("More options")
+        self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.control_menu = self._build_control_menu(self.menu_button)
+        self.menu_button.setMenu(self.control_menu)
+        header.addWidget(self.menu_button)
 
-        menu = QMenu(menu_button)
-        add_action = menu.addAction("Add a card")
-        add_action.triggered.connect(self._add_card)
-        menu.addSeparator()
-        reset_action = menu.addAction("Reset all data")
-        reset_action.triggered.connect(self._reset_all_data)
-        menu_button.setMenu(menu)
-        header.addWidget(menu_button)
-
-        subtitle = QLabel("Track when statements are ready and when payments are due.")
-        subtitle.setObjectName("subtitle")
-        subtitle.setWordWrap(True)
-        shell_layout.addLayout(header)
-        shell_layout.addWidget(subtitle)
+        self.subtitle = QLabel(
+            "Track when statements are ready and when payments are due."
+        )
+        self.subtitle.setObjectName("subtitle")
+        self.subtitle.setWordWrap(True)
+        self.shell_layout.addLayout(header)
+        self.shell_layout.addWidget(self.subtitle)
 
         self.summary_frame = QFrame()
         self.summary_layout = QVBoxLayout(self.summary_frame)
         self.summary_layout.setContentsMargins(15, 14, 15, 14)
         self.summary_layout.setSpacing(6)
-        shell_layout.addWidget(self.summary_frame)
+        self.shell_layout.addWidget(self.summary_frame)
 
         self.success_row = QWidget()
         success_layout = QHBoxLayout(self.success_row)
@@ -412,38 +521,312 @@ class CreditCardWidget(QMainWindow):
         success_layout.addWidget(self.success_label, 1)
         success_layout.addWidget(self.undo_button)
         self.success_row.hide()
-        shell_layout.addWidget(self.success_row)
+        self.shell_layout.addWidget(self.success_row)
 
-        cards_heading = QLabel("YOUR CARDS")
-        cards_heading.setObjectName("sectionTitle")
-        shell_layout.addWidget(cards_heading)
+        self.cards_heading = QLabel("YOUR CARDS")
+        self.cards_heading.setObjectName("sectionTitle")
+        self.shell_layout.addWidget(self.cards_heading)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_container = QWidget()
         self.list_layout = QVBoxLayout(self.list_container)
         self.list_layout.setContentsMargins(0, 2, 0, 2)
         self.list_layout.setSpacing(10)
         self.list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.list_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
-        scroll.setWidget(self.list_container)
-        shell_layout.addWidget(scroll, 1)
+        self.scroll.setWidget(self.list_container)
+        self.shell_layout.addWidget(self.scroll, 1)
 
-        root_layout.addWidget(shell)
+        self.root_layout.addWidget(self.shell)
         self.setCentralWidget(root)
+        self._install_drag_targets(self.shell)
+
+    def _build_control_menu(self, parent: QWidget) -> QMenu:
+        menu = QMenu(parent)
+
+        add_action = menu.addAction("Add a card")
+        add_action.triggered.connect(self._add_card)
+        menu.addSeparator()
+
+        self.widget_mode_action = menu.addAction("Desktop Widget Mode")
+        self.widget_mode_action.setCheckable(True)
+        self.widget_mode_action.triggered.connect(self.set_desktop_widget_mode)
+
+        self.always_on_top_action = menu.addAction("Always on Top")
+        self.always_on_top_action.setCheckable(True)
+        self.always_on_top_action.triggered.connect(self.set_always_on_top)
+
+        self.stay_behind_action = menu.addAction("Stay Behind Normal Windows")
+        self.stay_behind_action.setCheckable(True)
+        self.stay_behind_action.triggered.connect(self.set_stay_behind)
+
+        self.lock_position_action = menu.addAction("Lock Position")
+        self.lock_position_action.setCheckable(True)
+        self.lock_position_action.triggered.connect(self.set_lock_position)
+
+        opacity_menu = menu.addMenu("Widget Opacity")
+        self.opacity_group = QActionGroup(self)
+        self.opacity_group.setExclusive(True)
+        self.opacity_actions: dict[float, QAction] = {}
+        for label, opacity in (("70%", 0.70), ("85%", 0.85), ("95%", 0.95)):
+            action = opacity_menu.addAction(label)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked, value=opacity: (
+                    self.set_widget_opacity(value) if checked else None
+                )
+            )
+            self.opacity_group.addAction(action)
+            self.opacity_actions[opacity] = action
+
+        reset_position_action = menu.addAction("Reset Position")
+        reset_position_action.triggered.connect(self.reset_window_position)
+
+        menu.addSeparator()
+        reset_action = menu.addAction("Reset All Data")
+        reset_action.triggered.connect(self._reset_all_data)
+        quit_action = menu.addAction("Quit Credit Card Due")
+        quit_action.triggered.connect(QApplication.instance().quit)
+
+        menu.aboutToShow.connect(self._sync_control_menu)
+        return menu
+
+    def _build_shortcuts(self) -> None:
+        shortcut_sequence = (
+            "Meta+Shift+W" if sys.platform == "darwin" else "Ctrl+Shift+W"
+        )
+        self.widget_mode_shortcut = QShortcut(
+            QKeySequence(shortcut_sequence),
+            self,
+        )
+        self.widget_mode_shortcut.activated.connect(
+            lambda: self.set_desktop_widget_mode(
+                not self.preferences.desktop_widget_mode
+            )
+        )
+
+    def _sync_control_menu(self) -> None:
+        self.widget_mode_action.setChecked(self.preferences.desktop_widget_mode)
+        self.always_on_top_action.setChecked(self.preferences.always_on_top)
+        self.stay_behind_action.setChecked(self.preferences.stay_behind)
+        self.stay_behind_action.setEnabled(self.preferences.desktop_widget_mode)
+        self.lock_position_action.setChecked(self.preferences.lock_position)
+        self.lock_position_action.setEnabled(self.preferences.desktop_widget_mode)
+        closest_opacity = min(
+            self.opacity_actions,
+            key=lambda value: abs(value - self.preferences.opacity),
+        )
+        for opacity, action in self.opacity_actions.items():
+            action.setChecked(opacity == closest_opacity)
+
+    def set_desktop_widget_mode(self, enabled: bool) -> None:
+        if enabled == self.preferences.desktop_widget_mode:
+            return
+        if not self.preferences.desktop_widget_mode:
+            self._save_geometry()
+        self.preferences = self.settings_service.update(
+            self.preferences,
+            desktop_widget_mode=enabled,
+        )
+        self._apply_window_mode(refresh=True)
+        self._save_geometry()
+
+    def set_always_on_top(self, enabled: bool) -> None:
+        changes: dict[str, object] = {"always_on_top": enabled}
+        if enabled:
+            changes["stay_behind"] = False
+        self.preferences = self.settings_service.update(
+            self.preferences,
+            **changes,
+        )
+        self._apply_window_mode(refresh=False)
+
+    def set_stay_behind(self, enabled: bool) -> None:
+        changes: dict[str, object] = {"stay_behind": enabled}
+        if enabled:
+            changes["always_on_top"] = False
+        self.preferences = self.settings_service.update(
+            self.preferences,
+            **changes,
+        )
+        self._apply_window_mode(refresh=False)
+
+    def set_lock_position(self, enabled: bool) -> None:
+        self.preferences = self.settings_service.update(
+            self.preferences,
+            lock_position=enabled,
+        )
+        self._drag_offset = None
+
+    def set_widget_opacity(self, opacity: float) -> None:
+        opacity = max(0.65, min(1.0, opacity))
+        self.preferences = self.settings_service.update(
+            self.preferences,
+            opacity=opacity,
+        )
+        self.setStyleSheet(
+            build_app_stylesheet(
+                desktop_widget_mode=self.preferences.desktop_widget_mode,
+                opacity=self.preferences.opacity,
+            )
+        )
+
+    def reset_window_position(self) -> None:
+        position = self._default_position()
+        self.move(position)
+        self._save_geometry()
+
+    def _window_flags(self) -> Qt.WindowType:
+        if self.preferences.desktop_widget_mode:
+            flags = (
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.Tool
+                | Qt.WindowType.NoDropShadowWindowHint
+            )
+            if self.preferences.always_on_top:
+                flags |= Qt.WindowType.WindowStaysOnTopHint
+            elif self.preferences.stay_behind:
+                # This is the closest reliable Qt-only approximation to a
+                # desktop-layer widget. It does not pin the window directly
+                # to the wallpaper and behavior can vary by window manager.
+                flags |= Qt.WindowType.WindowStaysOnBottomHint
+            return flags
+
+        flags = Qt.WindowType.Window
+        if self.preferences.always_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        return flags
+
+    def _apply_window_mode(self, *, refresh: bool) -> None:
+        was_visible = self.isVisible()
+        current_position = self.pos()
+        self._applying_window_mode = True
+        try:
+            self.setWindowFlags(self._window_flags())
+            widget_mode = self.preferences.desktop_widget_mode
+            self.setAttribute(
+                Qt.WidgetAttribute.WA_TranslucentBackground,
+                widget_mode,
+            )
+            if sys.platform == "darwin":
+                # Qt.Tool keeps the window out of the normal task switcher.
+                # WA_MacAlwaysShowToolWindow keeps it visible while the app is
+                # inactive. Qt alone cannot guarantee visibility on every
+                # macOS Space without native AppKit collection behavior.
+                self.setAttribute(
+                    Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow,
+                    widget_mode,
+                )
+
+            self.setStyleSheet(
+                build_app_stylesheet(
+                    desktop_widget_mode=widget_mode,
+                    opacity=self.preferences.opacity,
+                )
+            )
+            self.subtitle.setVisible(not widget_mode)
+            self.cards_heading.setVisible(not widget_mode)
+
+            if widget_mode:
+                self.root_layout.setContentsMargins(0, 0, 0, 0)
+                self.shell_layout.setContentsMargins(16, 16, 16, 15)
+                self.shell_layout.setSpacing(10)
+                self.setMinimumSize(self.WIDGET_WIDTH, self.WIDGET_HEIGHT)
+                self.setMaximumSize(self.WIDGET_WIDTH, self.WIDGET_HEIGHT)
+                self.resize(self.WIDGET_WIDTH, self.WIDGET_HEIGHT)
+            else:
+                self.root_layout.setContentsMargins(10, 10, 10, 10)
+                self.shell_layout.setContentsMargins(20, 20, 20, 18)
+                self.shell_layout.setSpacing(14)
+                self.setMinimumSize(420, 560)
+                self.setMaximumSize(480, 16777215)
+                self.resize(
+                    self.preferences.normal_width,
+                    self.preferences.normal_height,
+                )
+
+            self.move(current_position)
+            if was_visible:
+                self.show()
+        finally:
+            self._applying_window_mode = False
+
+        if refresh:
+            self.refresh_cards()
+
+    def _default_position(self) -> QPoint:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return QPoint(40, 40)
+        available = screen.availableGeometry()
+        if self.preferences.desktop_widget_mode:
+            return QPoint(
+                available.right() - self.width() - 24,
+                available.top() + 24,
+            )
+        return QPoint(
+            available.center().x() - self.width() // 2,
+            available.center().y() - self.height() // 2,
+        )
+
+    def _restore_position(self) -> None:
+        x = self.preferences.window_x
+        y = self.preferences.window_y
+        if x is None or y is None:
+            self.move(self._default_position())
+            return
+
+        proposed = QRect(x, y, self.width(), self.height())
+        visible = any(
+            screen.availableGeometry().intersects(proposed)
+            for screen in QApplication.screens()
+        )
+        self.move(QPoint(x, y) if visible else self._default_position())
+
+    def _save_geometry(self) -> None:
+        if self._applying_window_mode:
+            return
+        changes: dict[str, object] = {
+            "window_x": self.x(),
+            "window_y": self.y(),
+        }
+        if not self.preferences.desktop_widget_mode:
+            changes.update(
+                {
+                    "normal_width": self.width(),
+                    "normal_height": self.height(),
+                }
+            )
+        self.preferences = self.settings_service.update(
+            self.preferences,
+            **changes,
+        )
+
+    def _install_drag_targets(self, widget: QWidget) -> None:
+        for target in [widget, *widget.findChildren(QWidget)]:
+            if isinstance(target, (QFrame, QLabel)):
+                target.installEventFilter(self)
 
     def _add_card(self) -> None:
         dialog = CardFormDialog(parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        card_name, statement_day, due_day, buffer_days = dialog.values()
+        (
+            card_name,
+            statement_day,
+            due_day,
+            buffer_days,
+            pre_authorized_debit,
+        ) = dialog.values()
         try:
             add_card(
                 card_name,
                 statement_day,
                 due_day,
                 buffer_days,
+                pre_authorized_debit,
             )
         except (ValueError, DatabaseError) as exc:
             self._show_error(str(exc))
@@ -461,23 +844,44 @@ class CreditCardWidget(QMainWindow):
             return
         self._render_summary()
         self._render_cards()
+        self._install_drag_targets(self.summary_frame)
+        self._install_drag_targets(self.list_container)
 
     def _render_summary(self) -> None:
         _clear_layout(self.summary_layout)
         due_cards = [
             card
             for card in self.cards
-            if card.status == PAYMENT_DUE and card.pay_by_date is not None
+            if (
+                card.status == PAYMENT_DUE
+                and card.pay_by_date is not None
+                and not card.pre_authorized_debit
+            )
         ]
         if not due_cards:
+            covered_due_count = sum(
+                1
+                for card in self.cards
+                if card.status == PAYMENT_DUE and card.pre_authorized_debit
+            )
             self.summary_frame.setObjectName("summaryClear")
             self.summary_frame.style().unpolish(self.summary_frame)
             self.summary_frame.style().polish(self.summary_frame)
 
-            title = QLabel("✓ No payment required")
+            title_text = (
+                "✓ No manual payment required"
+                if covered_due_count
+                else "✓ No payment required"
+            )
+            title = QLabel(title_text)
             title.setObjectName("statusGreen")
             title.setFont(QFont(title.font().family(), 16, QFont.Weight.Bold))
-            detail = QLabel("All cards are paid or waiting for the next statement.")
+            detail_text = (
+                "Due cards are covered by pre-authorized debit."
+                if covered_due_count
+                else "All cards are paid or waiting for the next statement."
+            )
+            detail = QLabel(detail_text)
             detail.setObjectName("mutedText")
             detail.setWordWrap(True)
             self.summary_layout.addWidget(title)
@@ -508,6 +912,8 @@ class CreditCardWidget(QMainWindow):
         dates.setObjectName("detailText")
         dates.setWordWrap(True)
         paid_button = QPushButton("Mark Paid")
+        if self.preferences.desktop_widget_mode:
+            paid_button.setObjectName("secondaryButton")
         paid_button.clicked.connect(partial(self._mark_paid, urgent.id))
 
         self.summary_layout.addWidget(eyebrow)
@@ -557,8 +963,12 @@ class CreditCardWidget(QMainWindow):
         layout.addLayout(header)
 
         if card.status == PAYMENT_DUE:
-            countdown = QLabel(self._payment_status_text(card))
-            countdown.setObjectName(self._payment_status_style(card))
+            if card.pre_authorized_debit:
+                countdown = QLabel("✓ AutoPay active")
+                countdown.setObjectName("statusGreen")
+            else:
+                countdown = QLabel(self._payment_status_text(card))
+                countdown.setObjectName(self._payment_status_style(card))
             due = QLabel(f"Official due date: {_format_date(card.current_due_date)}")
             due.setObjectName("detailText")
             pay_by = QLabel(f"Pay-by planning date: {_format_date(card.pay_by_date)}")
@@ -566,11 +976,22 @@ class CreditCardWidget(QMainWindow):
             layout.addWidget(countdown)
             layout.addWidget(due)
             layout.addWidget(pay_by)
+            if card.pre_authorized_debit:
+                note = QLabel(
+                    "Pre-authorized debit should handle this payment automatically."
+                )
+                note.setObjectName("detailText")
+                note.setWordWrap(True)
+                layout.addWidget(note)
         else:
             if card.status == PAID:
                 paid = QLabel("No payment required")
                 paid.setObjectName("statusGreen")
                 layout.addWidget(paid)
+            if card.pre_authorized_debit:
+                covered = QLabel("✓ AutoPay active")
+                covered.setObjectName("statusGreen")
+                layout.addWidget(covered)
             next_statement = QLabel(
                 "Next statement expected: "
                 f"{_format_date(card.current_statement_date)}"
@@ -580,10 +1001,25 @@ class CreditCardWidget(QMainWindow):
 
         actions = QHBoxLayout()
         actions.setSpacing(6)
-        if card.status == PAYMENT_DUE:
+        if card.status == PAYMENT_DUE and not card.pre_authorized_debit:
             paid_button = QPushButton("Mark Paid")
+            if self.preferences.desktop_widget_mode:
+                paid_button.setObjectName("secondaryButton")
             paid_button.clicked.connect(partial(self._mark_paid, card.id))
             actions.addWidget(paid_button)
+
+        autopay_button = QPushButton(
+            "Disable AutoPay" if card.pre_authorized_debit else "Enable AutoPay"
+        )
+        autopay_button.setObjectName("secondaryButton")
+        autopay_button.clicked.connect(
+            partial(
+                self._toggle_pre_authorized_debit,
+                card.id,
+                not card.pre_authorized_debit,
+            )
+        )
+        actions.addWidget(autopay_button)
         actions.addStretch(1)
 
         edit_button = QPushButton("Edit")
@@ -595,10 +1031,65 @@ class CreditCardWidget(QMainWindow):
         actions.addWidget(edit_button)
         actions.addWidget(delete_button)
         layout.addLayout(actions)
+        if self.preferences.desktop_widget_mode:
+            edit_button.hide()
+            delete_button.hide()
+        self._install_drag_targets(panel)
         return panel
+
+    def eventFilter(self, watched: object, event: QEvent) -> bool:
+        if self.preferences.desktop_widget_mode and not self.preferences.lock_position:
+            if event.type() == QEvent.Type.MouseButtonPress:
+                mouse_event = event
+                if (
+                    isinstance(mouse_event, QMouseEvent)
+                    and mouse_event.button() == Qt.MouseButton.LeftButton
+                ):
+                    self._drag_offset = (
+                        mouse_event.globalPosition().toPoint()
+                        - self.frameGeometry().topLeft()
+                    )
+                    return True
+            elif event.type() == QEvent.Type.MouseMove:
+                mouse_event = event
+                if (
+                    isinstance(mouse_event, QMouseEvent)
+                    and self._drag_offset is not None
+                    and mouse_event.buttons() & Qt.MouseButton.LeftButton
+                ):
+                    self.move(
+                        mouse_event.globalPosition().toPoint() - self._drag_offset
+                    )
+                    return True
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                if self._drag_offset is not None:
+                    self._drag_offset = None
+                    self._save_geometry()
+                    return True
+        return super().eventFilter(watched, event)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        self._sync_control_menu()
+        self.control_menu.exec(event.globalPos())
+
+    def moveEvent(self, event: QMoveEvent) -> None:
+        super().moveEvent(event)
+        if not self._applying_window_mode:
+            self._geometry_save_timer.start()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if not self._applying_window_mode and not self.preferences.desktop_widget_mode:
+            self._geometry_save_timer.start()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._save_geometry()
+        super().closeEvent(event)
 
     @staticmethod
     def _card_status_title(card: CreditCard) -> str:
+        if card.pre_authorized_debit:
+            return "✓ AutoPay active"
         if card.status == PAID:
             return "✓ Paid"
         if card.status == NO_PAYMENT_REQUIRED:
@@ -607,7 +1098,7 @@ class CreditCardWidget(QMainWindow):
 
     @staticmethod
     def _card_status_style(card: CreditCard) -> str:
-        if card.status in {PAID, NO_PAYMENT_REQUIRED}:
+        if card.pre_authorized_debit or card.status in {PAID, NO_PAYMENT_REQUIRED}:
             return "statusGreen"
         return CreditCardWidget._payment_status_style(card)
 
@@ -657,11 +1148,31 @@ class CreditCardWidget(QMainWindow):
         self._show_success("Payment status restored.")
         self.refresh_cards()
 
+    def _toggle_pre_authorized_debit(self, card_id: int, enabled: bool) -> None:
+        try:
+            set_pre_authorized_debit(card_id, enabled)
+        except (ValueError, DatabaseError) as exc:
+            self._show_error(str(exc))
+            return
+
+        if enabled:
+            message = "AutoPay enabled. Green check added for this card."
+        else:
+            message = "AutoPay disabled. Manual payment reminders restored."
+        self._show_success(message)
+        self.refresh_cards()
+
     def _edit_card(self, card: CreditCard) -> None:
         dialog = CardFormDialog(card, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        card_name, statement_day, due_day, buffer_days = dialog.values()
+        (
+            card_name,
+            statement_day,
+            due_day,
+            buffer_days,
+            pre_authorized_debit,
+        ) = dialog.values()
         try:
             update_card(
                 card.id,
@@ -669,6 +1180,7 @@ class CreditCardWidget(QMainWindow):
                 statement_day,
                 due_day,
                 buffer_days,
+                pre_authorized_debit,
             )
         except (ValueError, DatabaseError) as exc:
             self._show_error(str(exc))

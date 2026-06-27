@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import copy_metadata
 
 
-project_root = Path.cwd()
+project_root = Path(SPECPATH).resolve().parent
+app_version = os.environ.get("APP_VERSION", "1.0.2")
+bundle_identifier = os.environ.get(
+    "BUNDLE_IDENTIFIER",
+    "com.creditcarddue.desktop",
+)
+signing_identity = os.environ.get("APPLE_SIGNING_IDENTITY") or None
 
 datas = []
 try:
@@ -46,7 +53,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
+    codesign_identity=signing_identity,
     entitlements_file=None,
 )
 
@@ -65,10 +72,13 @@ if sys.platform == "darwin":
         coll,
         name="Credit Card Due.app",
         icon=None,
-        bundle_identifier="com.aaronshang.creditcarddue",
+        bundle_identifier=bundle_identifier,
+        version=app_version,
         info_plist={
             "CFBundleDisplayName": "Credit Card Due",
-            "CFBundleShortVersionString": "1.0.1",
+            "CFBundleShortVersionString": app_version,
+            "LSApplicationCategoryType": "public.app-category.finance",
+            "LSMinimumSystemVersion": "11.0",
             "NSHighResolutionCapable": True,
         },
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import stat
 
 import duckdb
 import pytest
@@ -30,6 +31,18 @@ def test_packaged_macos_default_db_path(monkeypatch):
         / "Credit Card Due"
         / "cards.duckdb"
     )
+
+
+def test_default_database_uses_owner_only_permissions(tmp_path, monkeypatch):
+    database_path = tmp_path / "Credit Card Due" / "cards.duckdb"
+    monkeypatch.delenv(db.DB_PATH_ENV, raising=False)
+    monkeypatch.setattr(db, "get_default_db_path", lambda: database_path)
+
+    db.init_db()
+
+    if db.os.name == "posix":
+        assert stat.S_IMODE(database_path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(database_path.stat().st_mode) == 0o600
 
 
 def test_init_db_imports_supported_legacy_schema(tmp_path, monkeypatch):
@@ -85,6 +98,65 @@ def test_init_db_imports_supported_legacy_schema(tmp_path, monkeypatch):
 
     assert db.TABLE_NAME in tables
     assert "credit_card_bills_legacy" in tables
+
+
+def test_init_db_adds_pre_authorized_debit_to_existing_card_schema(
+    tmp_path,
+    monkeypatch,
+):
+    database_path = tmp_path / "old-card-schema.duckdb"
+    monkeypatch.setenv(db.DB_PATH_ENV, str(database_path))
+
+    connection = duckdb.connect(str(database_path))
+    try:
+        connection.execute(
+            """
+            CREATE TABLE credit_cards (
+                id INTEGER PRIMARY KEY,
+                card_name VARCHAR NOT NULL,
+                statement_day INTEGER NOT NULL,
+                due_day INTEGER NOT NULL,
+                safety_buffer_days INTEGER NOT NULL DEFAULT 7,
+                current_statement_date DATE,
+                current_due_date DATE,
+                status VARCHAR NOT NULL,
+                last_paid_at TIMESTAMP,
+                last_paid_due_date DATE,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO credit_cards
+            VALUES (
+                1,
+                'Existing Visa',
+                5,
+                25,
+                7,
+                DATE '2026-07-05',
+                DATE '2026-07-25',
+                ?,
+                NULL,
+                NULL,
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP,
+                TRUE
+            )
+            """,
+            [db.PAYMENT_DUE],
+        )
+    finally:
+        connection.close()
+
+    db.init_db()
+
+    card = db.get_cards(today=date(2026, 7, 5))[0]
+    assert card.card_name == "Existing Visa"
+    assert card.pre_authorized_debit is False
 
 
 def test_clamp_day_for_short_months():
@@ -184,6 +256,32 @@ def test_add_card_starts_no_payment_required_before_statement_date(isolated_db):
     assert card.current_due_date == date(2026, 8, 5)
 
 
+def test_add_card_defaults_pre_authorized_debit_false(isolated_db):
+    db.add_card(
+        "Manual Payment Visa",
+        5,
+        25,
+        today=date(2026, 7, 5),
+    )
+
+    card = db.get_cards(today=date(2026, 7, 5))[0]
+    assert card.pre_authorized_debit is False
+
+
+def test_add_card_can_enable_pre_authorized_debit(isolated_db):
+    db.add_card(
+        "PAD Visa",
+        5,
+        25,
+        7,
+        True,
+        today=date(2026, 7, 5),
+    )
+
+    card = db.get_cards(today=date(2026, 7, 5))[0]
+    assert card.pre_authorized_debit is True
+
+
 def test_mark_paid_changes_status_and_advances_cycle(isolated_db):
     card_id = db.add_card(
         "Test Visa",
@@ -268,6 +366,78 @@ def test_refresh_transitions_waiting_card_when_statement_arrives(isolated_db):
     due = db.get_cards(today=date(2026, 7, 15))[0]
     assert due.status == db.PAYMENT_DUE
     assert due.current_due_date == date(2026, 8, 5)
+
+
+def test_pre_authorized_card_stays_current_through_official_due_date(isolated_db):
+    db.add_card(
+        "Due Today PAD",
+        13,
+        6,
+        5,
+        True,
+        today=date(2026, 6, 20),
+    )
+
+    card = db.get_cards(today=date(2026, 7, 6))[0]
+    assert card.pre_authorized_debit is True
+    assert card.status == db.PAYMENT_DUE
+    assert card.current_statement_date == date(2026, 6, 13)
+    assert card.current_due_date == date(2026, 7, 6)
+
+
+def test_pre_authorized_card_rolls_forward_after_official_due_date(isolated_db):
+    db.add_card(
+        "Automatic PAD",
+        13,
+        6,
+        5,
+        True,
+        today=date(2026, 6, 20),
+    )
+
+    card = db.get_cards(today=date(2026, 7, 7))[0]
+    assert card.pre_authorized_debit is True
+    assert card.status == db.NO_PAYMENT_REQUIRED
+    assert card.current_statement_date == date(2026, 7, 13)
+    assert card.current_due_date == date(2026, 8, 6)
+
+
+def test_pre_authorized_card_becomes_due_for_next_statement(isolated_db):
+    db.add_card(
+        "Next PAD",
+        13,
+        6,
+        5,
+        True,
+        today=date(2026, 6, 20),
+    )
+
+    card = db.get_cards(today=date(2026, 7, 13))[0]
+    assert card.pre_authorized_debit is True
+    assert card.status == db.PAYMENT_DUE
+    assert card.current_statement_date == date(2026, 7, 13)
+    assert card.current_due_date == date(2026, 8, 6)
+
+
+def test_pre_authorized_paid_card_rolls_forward_when_reopened_later(isolated_db):
+    card_id = db.add_card(
+        "Long Closed PAD",
+        5,
+        25,
+        7,
+        True,
+        today=date(2026, 7, 5),
+    )
+    db.mark_card_paid(
+        card_id,
+        paid_at=datetime(2026, 7, 10, 9, 30),
+    )
+
+    card = db.get_cards(today=date(2026, 9, 1))[0]
+    assert card.pre_authorized_debit is True
+    assert card.status == db.NO_PAYMENT_REQUIRED
+    assert card.current_statement_date == date(2026, 9, 5)
+    assert card.current_due_date == date(2026, 9, 25)
 
 
 def test_refresh_repairs_future_cycle_from_previous_add_algorithm(isolated_db):
@@ -371,6 +541,70 @@ def test_edit_waiting_card_uses_current_month_statement_cycle(isolated_db):
     assert card.status == db.PAYMENT_DUE
     assert card.current_statement_date == date(2026, 6, 13)
     assert card.current_due_date == date(2026, 7, 6)
+
+
+def test_update_card_toggles_pre_authorized_debit(isolated_db):
+    card_id = db.add_card(
+        "Toggle PAD",
+        5,
+        25,
+        today=date(2026, 7, 5),
+    )
+
+    db.update_card(
+        card_id,
+        "Toggle PAD",
+        5,
+        25,
+        7,
+        True,
+        today=date(2026, 7, 5),
+    )
+
+    card = db.get_cards(today=date(2026, 7, 5))[0]
+    assert card.pre_authorized_debit is True
+
+
+def test_update_card_preserves_pre_authorized_debit_when_omitted(isolated_db):
+    card_id = db.add_card(
+        "Preserve PAD",
+        5,
+        25,
+        7,
+        True,
+        today=date(2026, 7, 5),
+    )
+
+    db.update_card(
+        card_id,
+        "Preserve PAD Renamed",
+        5,
+        25,
+        5,
+        today=date(2026, 7, 5),
+    )
+
+    card = db.get_cards(today=date(2026, 7, 5))[0]
+    assert card.card_name == "Preserve PAD Renamed"
+    assert card.safety_buffer_days == 5
+    assert card.pre_authorized_debit is True
+
+
+def test_set_pre_authorized_debit_toggles_card(isolated_db):
+    card_id = db.add_card(
+        "Inline AutoPay Toggle",
+        5,
+        25,
+        today=date(2026, 7, 5),
+    )
+
+    db.set_pre_authorized_debit(card_id, True)
+    enabled = db.get_cards(today=date(2026, 7, 5))[0]
+    assert enabled.pre_authorized_debit is True
+
+    db.set_pre_authorized_debit(card_id, False)
+    disabled = db.get_cards(today=date(2026, 7, 5))[0]
+    assert disabled.pre_authorized_debit is False
 
 
 def test_delete_soft_deactivates_card(isolated_db):
