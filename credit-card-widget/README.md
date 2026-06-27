@@ -268,6 +268,14 @@ table is retained under a `credit_card_bills_legacy` backup name.
 
 ## Run tests
 
+Install the development/test dependencies first:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Then run:
+
 ```bash
 pytest
 ```
@@ -275,6 +283,30 @@ pytest
 The tests focus on monthly date calculations, short months, payment
 lifecycle transitions, duplicate prevention, deletion, reset, undo, settings
 persistence, and desktop widget window-mode behavior.
+
+## What files are actually needed?
+
+For normal app development, keep:
+
+- `app.py`, `db.py`, `ui.py`, `settings.py`
+- `requirements.txt`
+- `README.md`
+
+For the clickable macOS app, also keep:
+
+- `scripts/build_macos.sh`
+- `packaging/credit_card_widget.spec`
+- `requirements-build.txt`
+- `.github/workflows/credit-card-widget-macos.yml`
+
+For safe future changes, keep `tests/` and `requirements-dev.txt`. They are not
+used by the packaged app, but they catch date-cycle, AutoPay, database
+migration, and widget-mode regressions before release.
+
+Ignored local files such as `.build-venv/`, `build/`, `dist/`, `__pycache__/`,
+`.pytest_cache/`, and `cards.duckdb` can be deleted locally if you want to
+free space. The build script can recreate build folders, and the app recreates
+its local database if missing.
 
 ## Project layout
 
@@ -293,6 +325,7 @@ credit-card-widget/
 │   ├── test_settings.py
 │   └── test_widget_mode.py
 ├── requirements-build.txt
+├── requirements-dev.txt
 ├── requirements.txt
 └── README.md
 ```
